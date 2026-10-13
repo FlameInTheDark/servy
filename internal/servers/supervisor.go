@@ -176,6 +176,66 @@ func (s *Supervisor) AgreeEULA() error {
 
 // ---------------- Start ----------------
 
+// executionArgv resolves manifest placeholders and appends typed Steam launch
+// values without flattening user input into a shell command string.
+func (s *Supervisor) executionArgv(def gen.Server) ([]string, error) {
+	if strings.ContainsRune(def.ExecutionCommand, '\x00') {
+		return nil, errors.New("execution command contains a NUL byte")
+	}
+	argv := splitCommand(def.ExecutionCommand)
+	if len(argv) == 0 {
+		return nil, errors.New("EMPTY_EXECUTION_COMMAND")
+	}
+	if def.Type != models.TypeSteamCmd {
+		return argv, nil
+	}
+	snapshot, err := steamcmd.GameSnapshotFromDefinitions(def.Definitions)
+	if err != nil {
+		return nil, err
+	}
+	if snapshot == nil {
+		return argv, nil
+	}
+	port := int(def.ServerPort)
+	queryPort := snapshot.Game.QueryPort
+	if queryPort == 0 {
+		queryPort = port + 1
+	}
+	saveDir := filepath.Join(def.Path, "saves")
+	if strings.ContainsAny(def.ServerName+saveDir, "\x00\r\n") {
+		return nil, errors.New("server name or save directory contains a control character")
+	}
+	context := steamcmd.LaunchContext{
+		ServerName: def.ServerName, Port: port, QueryPort: queryPort, SaveDir: saveDir,
+	}
+	replacer := strings.NewReplacer(
+		"{SERVER_NAME}", def.ServerName,
+		"{PORT}", strconv.Itoa(port),
+		"{QUERY_PORT}", strconv.Itoa(queryPort),
+		"{SAVE_DIR}", saveDir,
+	)
+	for i := range argv {
+		argv[i] = replacer.Replace(argv[i])
+	}
+	launchArgs, _, err := steamcmd.ResolveLaunchOptions(snapshot.Game.LaunchOptions, snapshot.LaunchOptions, context)
+	if err != nil {
+		return nil, err
+	}
+	return append(argv, launchArgs...), nil
+}
+
+// gameManifest returns the server's frozen catalog entry when available. Older
+// server rows predate snapshots, so their legacy behavior falls back to catalog.
+func (s *Supervisor) gameManifest(def gen.Server) (steamcmd.Game, bool) {
+	if snapshot, err := steamcmd.GameSnapshotFromDefinitions(def.Definitions); err == nil && snapshot != nil {
+		return snapshot.Game, true
+	}
+	if s.deps.Catalog != nil && def.AppID != nil && *def.AppID != "" {
+		return s.deps.Catalog.ByAppID(*def.AppID)
+	}
+	return steamcmd.Game{}, false
+}
+
 // Start launches the server process. userID/lang drive user-facing notifications.
 func (s *Supervisor) Start(userID int64) error {
         s.mu.Lock()
@@ -224,26 +284,33 @@ func (s *Supervisor) Start(userID int64) error {
         s.setState(models.StateStarting)
         s.terminal.Clear()
 
-        argv := splitCommand(def.ExecutionCommand)
-        if len(argv) == 0 {
+        argv, err := s.executionArgv(def)
+        if err != nil {
                 s.setState(models.StateStopped)
-                return errors.New("EMPTY_EXECUTION_COMMAND")
+                return err
         }
         if def.ExecutionBackend == "docker" {
                 return s.startDocker(def, argv, userID)
         }
         // per-server java selection (legacy get_execution_java semantics)
         argv = ApplyJavaSelection(argv, def.JavaSelection)
-        // per-server terminal selection: wrap the command line in the chosen
-        // shell (bash/sh on Unix, cmd/powershell/git-bash on Windows) so
-        // batch files and shell syntax work. "none" execs directly.
-        exe, args, err := BuildShellCommand(def.Shell, argv)
+        // Frozen Steam game manifests are argv templates rather than shell
+        // scripts; always exec them directly so launch values cannot be
+        // expanded or reinterpreted by a shell.
+        shellSelection := def.Shell
+        if def.Type == models.TypeSteamCmd {
+                if snapshot, snapshotErr := steamcmd.GameSnapshotFromDefinitions(def.Definitions); snapshotErr == nil && snapshot != nil {
+                        shellSelection = "none"
+                }
+        }
+        // Other server types may use their selected shell to launch scripts.
+        exe, args, err := BuildShellCommand(shellSelection, argv)
         if err != nil {
                 s.setState(models.StateStopped)
                 s.deps.Log.Get("server").Error("server %s: terminal %q unavailable on this host", def.ServerName, def.Shell)
                 return fmt.Errorf("%w: %q", err, def.Shell)
         }
-        if spec, _ := ResolveShell(def.Shell); spec.Kind != "none" && def.Shell != "" && def.Shell != "auto" {
+        if spec, _ := ResolveShell(shellSelection); spec.Kind != "none" && shellSelection != "" && shellSelection != "auto" {
                 s.deps.Log.Get("server").Info("server %s: launching via %s", def.ServerName, spec.Label)
         }
         cmd := exec.Command(exe, args...)
@@ -707,10 +774,7 @@ func (s *Supervisor) pingTarget() string {
 // port. Explicit per-server `docker_ports` always win (checked by the caller).
 // Entries with the same port+proto are de-duplicated.
 func (s *Supervisor) catalogPorts(def gen.Server) []string {
-        if s.deps.Catalog == nil || def.AppID == nil || *def.AppID == "" {
-                return nil
-        }
-        game, ok := s.deps.Catalog.ByAppID(*def.AppID)
+        game, ok := s.gameManifest(def)
         if !ok || len(game.Expose) == 0 {
                 return nil
         }
@@ -893,8 +957,7 @@ func (s *Supervisor) filterUsablePorts(def gen.Server, specs []string) ([]string
         }
         // Which ports are optional per the catalog?
         optional := map[int]bool{}
-        if s.deps.Catalog != nil && def.AppID != nil && *def.AppID != "" {
-                if game, ok := s.deps.Catalog.ByAppID(*def.AppID); ok {
+        if game, ok := s.gameManifest(def); ok {
                         base := int(def.ServerPort)
                         for _, e := range game.Expose {
                                 if e.Optional {
@@ -902,7 +965,6 @@ func (s *Supervisor) filterUsablePorts(def gen.Server, specs []string) ([]string
                                 }
                         }
                 }
-        }
 
         var (
                 kept  []string
@@ -1329,10 +1391,8 @@ func (s *Supervisor) GamePort() int {
 // Source-engine games follow the game_port + 1 convention; titles that declare
 // an explicit query port in the catalog (Abiotic Factor) use that instead.
 func (s *Supervisor) QueryPort() int {
-        if s.deps.Catalog != nil && s.def.AppID != nil && *s.def.AppID != "" {
-                if g, ok := s.deps.Catalog.ByAppID(*s.def.AppID); ok && g.QueryPort > 0 {
-                        return g.QueryPort
-                }
+        if game, ok := s.gameManifest(s.def); ok && game.QueryPort > 0 {
+                return game.QueryPort
         }
         return s.GamePort() + 1
 }

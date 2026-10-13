@@ -8,19 +8,22 @@ import (
         "compress/gzip"
         "context"
         "embed"
+	"encoding/json"
+	"errors"
         "fmt"
-        "github.com/FlameInTheDark/servy/internal/defaults"
-        "github.com/FlameInTheDark/servy/internal/dockerx"
         "io"
         "net/http"
         "os"
         "os/exec"
         "path/filepath"
         "runtime"
+	"sort"
         "strings"
+	"sync"
         "time"
 
-        "gopkg.in/yaml.v3"
+	"github.com/FlameInTheDark/servy/internal/defaults"
+	"github.com/FlameInTheDark/servy/internal/dockerx"
 )
 
 //go:embed games/*.yaml
@@ -47,7 +50,9 @@ type Game struct {
         PortName    string              `json:"port_name" yaml:"port_name"`
         Env         map[string][]string `json:"env,omitempty" yaml:"env,omitempty"` // env.json seed
         Workshop    bool                `json:"workshop" yaml:"workshop"`
-        ConfigFiles []string            `json:"config_files,omitempty" yaml:"config_files,omitempty"` // editable config files (descriptors)
+	ConfigFiles   []string             `json:"config_files,omitempty" yaml:"config_files,omitempty"` // legacy paths, auto-detected editor
+	ConfigEditors []ConfigFileEditor   `json:"config_editors,omitempty" yaml:"config_editors,omitempty"`
+	LaunchOptions []LaunchOption       `json:"launch_options,omitempty" yaml:"launch_options,omitempty"`
         Notes       string              `json:"notes,omitempty" yaml:"notes,omitempty"`
         SaveDirs    []string            `json:"save_dirs,omitempty" yaml:"save_dirs,omitempty"` // world/save directories to persist
         BackupDirs  []string            `json:"backup_dirs,omitempty" yaml:"backup_dirs,omitempty"` // directories to include in backups (relative to server data dir)
@@ -68,6 +73,63 @@ type Game struct {
         // docker execution backend with a Wine-capable image (e.g. Enshrouded,
         // Sons of the Forest, Neos VR).
         WindowsOnly bool `json:"windows_only,omitempty" yaml:"windows_only,omitempty"`
+}
+
+// ConfigFileEditor gives a declared game config file a friendly name and an
+// editor hint. The file is shown only after it exists inside the server folder.
+type ConfigFileEditor struct {
+	Path        string `json:"path" yaml:"path"`
+	Label       string `json:"label,omitempty" yaml:"label,omitempty"`
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+	Editor      string `json:"editor,omitempty" yaml:"editor,omitempty"` // auto | raw | lines
+}
+
+// LaunchOption describes one typed value collected when a Steam game server is
+// created and appended to its command as a separate, safely quoted argument.
+type LaunchOption struct {
+	Key         string              `json:"key" yaml:"key"`
+	Label       string              `json:"label" yaml:"label"`
+	Description string              `json:"description,omitempty" yaml:"description,omitempty"`
+	Type        string              `json:"type" yaml:"type"` // text | password | number | boolean | select
+	Flag        string              `json:"flag,omitempty" yaml:"flag,omitempty"`
+	Source      string              `json:"source,omitempty" yaml:"source,omitempty"` // server_name | port | query_port | save_dir
+	Default     string              `json:"default,omitempty" yaml:"default,omitempty"`
+	Required    bool                `json:"required,omitempty" yaml:"required,omitempty"`
+	Min         *int                `json:"min,omitempty" yaml:"min,omitempty"`
+	Max         *int                `json:"max,omitempty" yaml:"max,omitempty"`
+	MinLength   *int                `json:"min_length,omitempty" yaml:"min_length,omitempty"`
+	MaxLength   *int                `json:"max_length,omitempty" yaml:"max_length,omitempty"`
+	TrueValue   string              `json:"true_value,omitempty" yaml:"true_value,omitempty"`
+	FalseValue  string              `json:"false_value,omitempty" yaml:"false_value,omitempty"`
+	Options     []LaunchOptionValue `json:"options,omitempty" yaml:"options,omitempty"`
+}
+
+// LaunchOptionValue is one choice for a select launch option.
+type LaunchOptionValue struct {
+	Value string `json:"value" yaml:"value"`
+	Label string `json:"label" yaml:"label"`
+}
+
+// LaunchContext supplies values Servy already knows, such as the server name
+// and allocated game port, to manifest options declared with `source`.
+type LaunchContext struct {
+	ServerName string
+	Port       int
+	QueryPort  int
+	SaveDir    string
+}
+
+// GameSnapshot freezes the catalog definition used to create one server. This
+// is stored in servers.definitions so later catalog edits only affect new servers.
+type GameSnapshot struct {
+	Game          Game              `json:"game"`
+	LaunchOptions map[string]string `json:"launch_options,omitempty"`
+}
+
+// ServerDefinitions is the JSON envelope stored in the existing server
+// definitions column. The envelope leaves room for other per-server metadata.
+type ServerDefinitions struct {
+	SteamGame *GameSnapshot `json:"steam_game,omitempty"`
 }
 
 // ExposedPort is one host port a containerized server publishes.
@@ -102,10 +164,17 @@ func (e ExposedPort) ProtoOrDefault() string {
         return "tcp"
 }
 
-// Catalog is the curated + overlay game list.
-type Catalog struct{ games map[string]Game }
+// Catalog is the curated + persisted overlay game list. Reads are safe while
+// an administrator adds or removes a custom manifest through the running API.
+type Catalog struct {
+	mu          sync.RWMutex
+	games       map[string]Game
+	builtins    map[string]Game
+	custom      map[string]Game
+	overlayPath string
+}
 
-// loadBuiltinGames loads games from embedded YAML files.
+// loadBuiltinGames loads and validates the embedded YAML game definitions.
 func loadBuiltinGames() []Game {
         var games []Game
         entries, err := gameConfigs.ReadDir("games")
@@ -120,61 +189,284 @@ func loadBuiltinGames() []Game {
                 if err != nil {
                         panic(fmt.Sprintf("failed to read game config %s: %v", entry.Name(), err))
                 }
-                var game Game
-                if err := yaml.Unmarshal(data, &game); err != nil {
-                        panic(fmt.Sprintf("failed to parse game config %s: %v", entry.Name(), err))
+		game, err := ParseGameManifest(data)
+		if err != nil {
+			panic(fmt.Sprintf("invalid game config %s: %v", entry.Name(), err))
                 }
-                game.Type = "steam_cmd"
                 games = append(games, game)
         }
         return games
 }
 
-// BuiltinGames is the curated catalog of popular SteamCMD servers (loaded from embedded YAML).
+// BuiltinGames is the curated catalog of popular SteamCMD servers (loaded
+// from embedded YAML). Custom entries live in the data directory overlay.
 var BuiltinGames = loadBuiltinGames()
 
-// NewCatalog builds the catalog keyed by slug with overlay support
-// (extra games loaded from <data>/steamgames.json — user extensibility).
+// NewCatalog builds a catalog from built-in games and an optional JSON overlay.
+// It is retained as a convenience constructor; production startup uses
+// LoadCatalog so a malformed overlay is reported rather than silently ignored.
 func NewCatalog(overlayPath string) *Catalog {
-        c := &Catalog{games: map[string]Game{}}
-        for _, g := range BuiltinGames {
-                c.games[g.Slug] = g
-        }
-        if data, err := os.ReadFile(overlayPath); err == nil {
-                var extra []Game
-                if jsonUnmarshal(data, &extra) == nil {
-                        for _, g := range extra {
-                                g.Type = "steam_cmd"
-                                c.games[g.Slug] = g
-                        }
-                }
-        }
-        return c
+	catalog, err := LoadCatalog(overlayPath)
+	if err == nil {
+		return catalog
+	}
+	return newCatalog(overlayPath)
 }
 
-// All lists catalog games.
-func (c *Catalog) All() []Game {
-        out := make([]Game, 0, len(c.games))
-        for _, g := range c.games {
-                out = append(out, g)
+// LoadCatalog loads built-in manifests plus custom game definitions from the
+// JSON overlay. Invalid overlay data is an error; callers must not silently
+// start with a different catalog than the operator configured.
+func LoadCatalog(overlayPath string) (*Catalog, error) {
+	catalog := newCatalog(overlayPath)
+	if overlayPath == "" {
+		return catalog, nil
+	}
+	data, err := os.ReadFile(overlayPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return catalog, nil
         }
+	if err != nil {
+		return nil, fmt.Errorf("read Steam game catalog %q: %w", overlayPath, err)
+	}
+	if len(data) > 16*MaxGameManifestSize {
+		return nil, fmt.Errorf("Steam game catalog %q exceeds the maximum size", overlayPath)
+	}
+	var entries []Game
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&entries); err != nil {
+		return nil, fmt.Errorf("parse Steam game catalog %q: %w", overlayPath, err)
+	}
+	var extra interface{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("parse Steam game catalog %q: trailing JSON value", overlayPath)
+		}
+		return nil, fmt.Errorf("parse Steam game catalog %q: %w", overlayPath, err)
+	}
+
+	seen := map[string]bool{}
+	for _, game := range entries {
+		game.Type = "steam_cmd"
+		if err := ValidateGame(game); err != nil {
+			return nil, fmt.Errorf("invalid custom game %q: %w", game.Slug, err)
+		}
+		if seen[game.Slug] {
+			return nil, fmt.Errorf("duplicate custom game slug %q", game.Slug)
+                        }
+		seen[game.Slug] = true
+		if prior, ok := catalog.games[game.Slug]; ok && prior.AppID != game.AppID {
+			return nil, fmt.Errorf("custom game %q changes app_id from %d to %d; override a game only with its existing Steam app ID", game.Slug, prior.AppID, game.AppID)
+                }
+		for slug, prior := range catalog.games {
+			if slug != game.Slug && prior.AppID == game.AppID {
+				return nil, fmt.Errorf("Steam app_id %d is already registered by %q", game.AppID, slug)
+        }
+		}
+		catalog.custom[game.Slug] = cloneGame(game)
+		catalog.games[game.Slug] = cloneGame(game)
+	}
+	return catalog, nil
+}
+
+func newCatalog(overlayPath string) *Catalog {
+	catalog := &Catalog{
+		games:       make(map[string]Game, len(BuiltinGames)),
+		builtins:    make(map[string]Game, len(BuiltinGames)),
+		custom:      map[string]Game{},
+		overlayPath: overlayPath,
+	}
+	for _, game := range BuiltinGames {
+		game = cloneGame(game)
+		catalog.games[game.Slug] = game
+		catalog.builtins[game.Slug] = game
+	}
+	return catalog
+}
+
+// All lists built-in and custom games in stable name/slug order.
+func (c *Catalog) All() []Game {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+        out := make([]Game, 0, len(c.games))
+	for _, game := range c.games {
+		out = append(out, cloneGame(game))
+        }
+	sortGames(out)
         return out
+}
+
+// CustomAll lists only user-provided overlay definitions.
+func (c *Catalog) CustomAll() []Game {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]Game, 0, len(c.custom))
+	for _, game := range c.custom {
+		out = append(out, cloneGame(game))
+	}
+	sortGames(out)
+	return out
+}
+
+// IsCustom reports whether slug is provided by the data-directory overlay.
+func (c *Catalog) IsCustom(slug string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	_, ok := c.custom[slug]
+	return ok
 }
 
 // BySlug fetches one game.
 func (c *Catalog) BySlug(slug string) (Game, bool) {
-        g, ok := c.games[slug]
-        return g, ok
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	game, ok := c.games[slug]
+	return cloneGame(game), ok
 }
 
 // ByAppID fetches one game by its Steam app id.
 func (c *Catalog) ByAppID(appID string) (Game, bool) {
-        for _, g := range c.games {
-                if fmt.Sprint(g.AppID) == appID {
-                        return g, true
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, game := range c.games {
+		if fmt.Sprint(game.AppID) == appID {
+			return cloneGame(game), true
                 }
         }
         return Game{}, false
+}
+
+// Upsert persists a custom game manifest to the data-directory overlay and
+// immediately makes it available to creation and server runtime services.
+func (c *Catalog) Upsert(game Game) error {
+	game.Type = "steam_cmd"
+	game.Name = strings.TrimSpace(game.Name)
+	if err := ValidateGame(game); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.overlayPath == "" {
+		return fmt.Errorf("custom game catalog has no persistent overlay path")
+	}
+	for slug, prior := range c.games {
+		if slug != game.Slug && prior.AppID == game.AppID {
+			return fmt.Errorf("Steam app_id %d is already registered by %q", game.AppID, slug)
+		}
+	}
+	if prior, exists := c.builtins[game.Slug]; exists && prior.AppID != game.AppID {
+		return fmt.Errorf("built-in game %q cannot be reassigned to app_id %d", game.Slug, game.AppID)
+	}
+
+	custom := make(map[string]Game, len(c.custom)+1)
+	for slug, entry := range c.custom {
+		custom[slug] = cloneGame(entry)
+	}
+	custom[game.Slug] = cloneGame(game)
+	if err := c.writeOverlay(custom); err != nil {
+		return err
+	}
+	c.custom = custom
+	c.games[game.Slug] = cloneGame(game)
+	return nil
+}
+
+// DeleteCustom removes a user-provided definition. Built-in manifests are not
+// deletable; removing a custom override of a built-in restores the embedded one.
+func (c *Catalog) DeleteCustom(slug string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.custom[slug]; !ok {
+		return fmt.Errorf("custom game manifest %q not found", slug)
+	}
+	if c.overlayPath == "" {
+		return fmt.Errorf("custom game catalog has no persistent overlay path")
+	}
+	custom := make(map[string]Game, len(c.custom)-1)
+	for key, game := range c.custom {
+		if key != slug {
+			custom[key] = cloneGame(game)
+		}
+	}
+	if err := c.writeOverlay(custom); err != nil {
+		return err
+	}
+	c.custom = custom
+	if builtin, ok := c.builtins[slug]; ok {
+		c.games[slug] = cloneGame(builtin)
+	} else {
+		delete(c.games, slug)
+	}
+	return nil
+}
+
+func (c *Catalog) writeOverlay(entries map[string]Game) error {
+	games := make([]Game, 0, len(entries))
+	for _, game := range entries {
+		games = append(games, cloneGame(game))
+	}
+	sortGames(games)
+	data, err := json.MarshalIndent(games, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode Steam game catalog: %w", err)
+	}
+	if len(data) > 16*MaxGameManifestSize {
+		return fmt.Errorf("Steam game catalog exceeds the maximum size")
+	}
+	data = append(data, '\n')
+	if err := os.MkdirAll(filepath.Dir(c.overlayPath), 0o750); err != nil {
+		return fmt.Errorf("create Steam game catalog directory: %w", err)
+	}
+	file, err := os.CreateTemp(filepath.Dir(c.overlayPath), ".steamgames-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create Steam game catalog temp file: %w", err)
+	}
+	tempPath := file.Name()
+	defer os.Remove(tempPath)
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		return fmt.Errorf("secure Steam game catalog temp file: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return fmt.Errorf("write Steam game catalog: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return fmt.Errorf("sync Steam game catalog: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close Steam game catalog: %w", err)
+	}
+	if err := os.Rename(tempPath, c.overlayPath); err != nil {
+		return fmt.Errorf("replace Steam game catalog: %w", err)
+	}
+	return nil
+}
+
+func cloneGame(game Game) Game {
+	game.ConfigFiles = append([]string(nil), game.ConfigFiles...)
+	game.SaveDirs = append([]string(nil), game.SaveDirs...)
+	game.BackupDirs = append([]string(nil), game.BackupDirs...)
+	game.Expose = append([]ExposedPort(nil), game.Expose...)
+	if game.Env != nil {
+		env := make(map[string][]string, len(game.Env))
+		for key, values := range game.Env {
+			env[key] = append([]string(nil), values...)
+		}
+		game.Env = env
+	}
+	return game
+}
+
+func sortGames(games []Game) {
+	sort.Slice(games, func(i, j int) bool {
+		left, right := strings.ToLower(games[i].Name), strings.ToLower(games[j].Name)
+		if left == right {
+			return games[i].Slug < games[j].Slug
+		}
+		return left < right
+	})
 }
 
 // Manager wraps the steamcmd binary lifecycle.

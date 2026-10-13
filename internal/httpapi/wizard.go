@@ -25,6 +25,7 @@ type creationRequest struct {
 	JarName          string  `json:"jar_name"`
 	SteamSlug        string  `json:"steam_slug"`
 	AppID            string  `json:"app_id"`
+	SteamOptions     map[string]string `json:"steam_options"`
 	// execution environment (process | docker)
 	JavaSelection    string            `json:"java_selection"`
 	Shell            string            `json:"shell"`
@@ -48,7 +49,7 @@ func (r creationRequest) toCreationRequest() creation.Request {
 		CreateType: r.CreateType, Name: r.Name, ServerType: r.ServerType, Port: r.Port,
 		ArchivePath: r.ArchivePath, Executable: r.Executable, ExecutionCommand: r.ExecutionCommand,
 		StopCommand: r.StopCommand, MinMem: r.MinMem, MaxMem: r.MaxMem, JarURL: r.JarURL,
-		JarName: r.JarName, SteamSlug: r.SteamSlug, AppID: r.AppID, Roles: r.Roles,
+		JarName: r.JarName, SteamSlug: r.SteamSlug, AppID: r.AppID, SteamOptions: r.SteamOptions, Roles: r.Roles,
 		AutoStart: r.AutoStart, CrashDetection: r.CrashDetection,
 		JavaSelection: r.JavaSelection, Shell: r.Shell, ExecutionBackend: r.ExecutionBackend,
 		DockerImage: r.DockerImage, DockerEnv: r.DockerEnv, DockerPorts: r.DockerPorts,

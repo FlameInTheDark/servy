@@ -1,20 +1,60 @@
 app_id: 896660
 slug: "valheim"
 name: "Valheim"
-run_command: './valheim_server.x86_64 -name "{SERVER_NAME}" -port {PORT} -world "Dedicated" -password "secret" -public 1 -savedir {SAVE_DIR}'
+run_command: './valheim_server.x86_64 -public 1 -savedir {SAVE_DIR}'
 executable: "valheim_server.x86_64"
 stop_command: "stop"
 port: 2456
 port_name: "game"
 env:
   LD_LIBRARY_PATH: ["./linux64", "mode:append"]
-config_files:
-  - "adminlist.txt"
-  - "permittedlist.txt"
-  - "bannedlist.txt"
+launch_options:
+  - key: server_name
+    label: Server name
+    description: Name shown in the Valheim server browser.
+    type: text
+    source: server_name
+    flag: -name
+    max_length: 64
+  - key: port
+    label: Game port
+    description: UDP game port; the next UDP port is used for Steam queries.
+    type: number
+    source: port
+    flag: -port
+    min: 1
+    max: 65534
+  - key: world
+    label: World name
+    description: World save name. Use the existing world's name to load it.
+    type: text
+    flag: -world
+    default: Dedicated
+    min_length: 1
+    max_length: 64
+  - key: password
+    label: Server password
+    description: Valheim requires a password of at least 5 characters.
+    type: password
+    flag: -password
+    required: true
+    min_length: 5
+    max_length: 64
+config_editors:
+  - path: "saves/adminlist.txt"
+    label: Admin list
+    description: One player ID per line. Add IDs shown by Valheim; recent versions may use a V_-prefixed ID.
+    editor: lines
+  - path: "saves/permittedlist.txt"
+    label: Permitted list
+    description: One player ID per line. Only listed players may join when a permitted list is in use.
+    editor: lines
+  - path: "saves/bannedlist.txt"
+    label: Ban list
+    description: One player ID per line. Entries take effect after Valheim reloads the list or restarts.
+    editor: lines
 # Valheim is UDP-only: game port + the Steam query port on game_port+1.
 expose:
-  # no explicit port: follows the server's configured game port (remappable)
   - proto: udp
   - offset: 1
     proto: udp
@@ -23,7 +63,3 @@ save_dirs:
   - "saves/worlds"
 backup_dirs:
   - "saves"
-  - "adminlist.txt"
-  - "permittedlist.txt"
-  - "bannedlist.txt"
-  - "server.cfg"

@@ -159,7 +159,10 @@ func New(cfg *config.Manager, opts Options) (*App, error) {
 
         // Steam catalog is built first: supervisors consult it for per-game
         // metadata (query ports, save/backup dirs) when pinging servers.
-        catalog := steamcmd.NewCatalog(filepath.Join(paths.ConfigDir, "steamgames.json"))
+	catalog, err := steamcmd.LoadCatalog(filepath.Join(paths.ConfigDir, "steamgames.json"))
+	if err != nil {
+		return nil, fmt.Errorf("Steam game catalog: %w", err)
+	}
 
         // Host port allocator for containerized servers: detects servy-vs-servy
         // port clashes before `docker run` fails with an opaque daemon error.

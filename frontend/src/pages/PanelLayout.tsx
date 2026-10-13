@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Server, Users, Shield, Settings, ScrollText, Network,
-  LogOut, ChevronsLeft, ChevronsRight, UserCircle, Plus, Menu, X, Activity, ChevronDown,
+  LogOut, ChevronsLeft, ChevronsRight, UserCircle, Plus, Menu, X, Activity, ChevronDown, Gamepad2,
 } from "lucide-react";
 import { useAuth } from "@/hooks/AuthContext";
 import { useApi } from "@/hooks/useApi";
@@ -123,6 +123,7 @@ export default function PanelLayout() {
             <SidebarLink to="/users" icon={Users} label="Users" collapsed={collapsed} />
             <SidebarLink to="/roles" icon={Shield} label="Roles" collapsed={collapsed} />
             <SidebarLink to="/nodes" icon={Network} label="Cluster" collapsed={collapsed} />
+            <SidebarLink to="/game-catalog" icon={Gamepad2} label="Game manifests" collapsed={collapsed} />
             <SidebarLink to="/config" icon={Settings} label="Panel Settings" collapsed={collapsed} />
           </NavSection>
         )}

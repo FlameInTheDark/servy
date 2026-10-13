@@ -54,6 +54,7 @@ export default function Settings({ server, onUpdate }: { server: ServerDef; onUp
 
   const set = (k: string, v: any) => setForm((f) => ({ ...f, [k]: v }));
   const isDocker = form.execution_backend === "docker";
+  const isManifestSteam = server.type === "steam_cmd" && server.steam_manifest === true;
 
   const save = async () => {
     setBusy(true);
@@ -74,7 +75,7 @@ export default function Settings({ server, onUpdate }: { server: ServerDef; onUp
         show_status: form.show_status,
         executable_update_url: form.executable_update_url,
         java_selection: form.java_selection,
-        shell: form.shell,
+        shell: isManifestSteam ? "none" : form.shell,
         execution_backend: form.execution_backend,
         docker_image: isDocker ? form.docker_image : "",
         docker_ports: isDocker ? form.docker_ports.split(",").map((s) => s.trim()).filter(Boolean) : [],
@@ -130,6 +131,11 @@ export default function Settings({ server, onUpdate }: { server: ServerDef; onUp
                 Java selection overrides the first token of this command at start.
               </p>
             )}
+            {isManifestSteam && (
+              <p className="text-xs text-muted-foreground">
+                This catalog-backed command runs directly without a shell. Manifest placeholders and saved launch parameters are added at start.
+              </p>
+            )}
           </div>
           <div className="space-y-1.5">
             <Label>Executable</Label>
@@ -160,7 +166,7 @@ export default function Settings({ server, onUpdate }: { server: ServerDef; onUp
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid gap-4 sm:grid-cols-2">
-            {!isDocker && (
+            {!isDocker && !isManifestSteam && (
               <div className="space-y-1.5">
                 <Label>Terminal</Label>
                 <SimpleSelect

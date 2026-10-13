@@ -18,6 +18,7 @@ import ProfilePage from "@/pages/Profile";
 import PanelConfigPage from "@/pages/PanelConfig";
 import LogsPage from "@/pages/Logs";
 import NodesPage from "@/pages/Nodes";
+import GameCatalogPage from "@/pages/GameCatalog";
 
 function Protected({ children }: { children: any }) {
   const { user, loading, needsSetup } = useAuth();
@@ -66,6 +67,7 @@ export default function App() {
               <Route path="config" element={<PanelConfigPage />} />
               <Route path="logs" element={<LogsPage />} />
               <Route path="nodes" element={<NodesPage />} />
+              <Route path="game-catalog" element={<GameCatalogPage />} />
             </Route>
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

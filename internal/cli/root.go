@@ -4,18 +4,21 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
+	"path/filepath"
 
-	clipkg "github.com/urfave/cli/v3"
 	"github.com/gofiber/fiber/v3"
+	clipkg "github.com/urfave/cli/v3"
 
 	"github.com/FlameInTheDark/servy/internal/authz"
 	"github.com/FlameInTheDark/servy/internal/cluster"
 	"github.com/FlameInTheDark/servy/internal/config"
+	"github.com/FlameInTheDark/servy/internal/configedit"
 	"github.com/FlameInTheDark/servy/internal/core"
 	"github.com/FlameInTheDark/servy/internal/database"
+	"github.com/FlameInTheDark/servy/internal/steamcmd"
 	"github.com/FlameInTheDark/servy/internal/version"
 )
 
@@ -44,6 +47,7 @@ func Root() *clipkg.Command {
 			importCommand(),
 			agentCommand(),
 			manifestCommand(),
+			gameManifestCommand(),
 			nodeCommand(),
 		},
 	}
@@ -335,17 +339,20 @@ func agentCommand() *clipkg.Command {
 func manifestCommand() *clipkg.Command {
 	return &clipkg.Command{
 		Name:  "manifest",
-		Usage: "manage server definition manifests",
+		Usage: "manage server-creation recipe manifests",
 		Commands: []*clipkg.Command{
 			{
 				Name:  "list",
-				Usage: "list stored manifests",
+				Usage: "list stored server-creation manifests",
 				Action: func(ctx context.Context, cmd *clipkg.Command) error {
 					_, app, err := loadConfigAndApp(cmd)
 					if err != nil {
 						return err
 					}
-					defs, _ := app.DB.ListDefinitions()
+					defs, err := app.DB.ListDefinitions()
+					if err != nil {
+						return err
+					}
 					for _, d := range defs {
 						fmt.Printf("%s\t%s\t%s\n", d.DefinitionID, d.Name, d.Source)
 					}
@@ -354,55 +361,151 @@ func manifestCommand() *clipkg.Command {
 			},
 			{
 				Name:  "add",
-				Usage: "import a manifest from a URL or file",
+				Usage: "validate and import a server-creation manifest from a URL or file",
 				Flags: []clipkg.Flag{
-					&clipkg.StringFlag{Name: "url", Usage: "remote manifest URL"},
-					&clipkg.StringFlag{Name: "file", Usage: "local manifest JSON"},
+					&clipkg.StringFlag{Name: "url", Usage: "remote server-creation manifest URL"},
+					&clipkg.StringFlag{Name: "file", Usage: "local server-creation manifest (JSON)"},
 				},
 				Action: func(ctx context.Context, cmd *clipkg.Command) error {
+					url, file := cmd.String("url"), cmd.String("file")
+					if (url == "") == (file == "") {
+						return fmt.Errorf("provide exactly one of --url or --file")
+					}
+					registry := configedit.NewRegistry()
+					var manifest *configedit.Manifest
+					var err error
+					if url != "" {
+						manifest, err = registry.FromURL(url)
+					} else {
+						var data []byte
+						data, err = os.ReadFile(file)
+						if err == nil {
+							manifest, err = registry.ParseManifest(data)
+						}
+					}
+					if err != nil {
+						return err
+					}
 					_, app, err := loadConfigAndApp(cmd)
 					if err != nil {
 						return err
 					}
-					// reuse the API service through httpapi? — direct: parse then store
-					var data []byte
-					if u := cmd.String("url"); u != "" {
-						dl, err := downloadTo(u)
+					raw, err := json.Marshal(manifest)
 						if err != nil {
 							return err
 						}
-						data = dl
-					} else if f := cmd.String("file"); f != "" {
-						data, err = os.ReadFile(f)
-						if err != nil {
-							return err
-						}
-					} else {
-						return fmt.Errorf("provide --url or --file")
+					source := "cli"
+					if url != "" {
+						source = "url"
 					}
-					// store raw; validation happens in the API layer
-					var m struct {
-						ID   string `json:"id"`
-						Name string `json:"name"`
-						Type string `json:"type"`
-					}
-					if err := jsonUnmarshal(data, &m); err != nil {
-						return err
-					}
-					if m.ID == "" {
-						m.ID = strings.ToLower(strings.ReplaceAll(m.Name, " ", "-"))
-					}
-					if m.Type == "" {
-						m.Type = "minecraft-java"
+					manifestVersion := manifest.Version
+					if manifestVersion == "" {
+						manifestVersion = "1"
 					}
 					now := database.Now()
-					mver := "1"
 					empty := ""
-					emptyP := &empty
-					if err := app.DB.UpsertDefinition(m.ID, m.Name, m.Type, emptyP, string(data), "cli", &mver, now, now); err != nil {
+					if err := app.DB.UpsertDefinition(manifest.ID, manifest.Name, manifest.Type, &empty,
+						string(raw), source, &manifestVersion, now, now); err != nil {
 						return err
 					}
-					fmt.Printf("Manifest %q stored as %s\n", m.Name, m.ID)
+					fmt.Printf("Manifest %q stored as %s\n", manifest.Name, manifest.ID)
+					return nil
+				},
+			},
+		},
+	}
+}
+
+// gameManifestCommand manages SteamCMD game definitions. Unlike `manifest`,
+// these manifests are runtime catalog entries stored in config/steamgames.json.
+func gameManifestCommand() *clipkg.Command {
+	return &clipkg.Command{
+		Name:  "game-manifest",
+		Usage: "manage SteamCMD game-server manifests",
+		Commands: []*clipkg.Command{
+			{
+				Name:  "list",
+				Usage: "list built-in and custom SteamCMD game definitions",
+				Action: func(ctx context.Context, cmd *clipkg.Command) error {
+					paths := core.ResolvePaths(dataDirOf(cmd))
+					catalog, err := steamcmd.LoadCatalog(filepath.Join(paths.ConfigDir, "steamgames.json"))
+						if err != nil {
+							return err
+						}
+					fmt.Printf("%-8s %-28s %-12s %-6s %s\n", "SOURCE", "SLUG", "APP ID", "PORT", "NAME")
+					for _, game := range catalog.All() {
+						source := "builtin"
+						if catalog.IsCustom(game.Slug) {
+							source = "custom"
+						}
+						fmt.Printf("%-8s %-28s %-12d %-6d %s\n", source, game.Slug, game.AppID, game.Port, game.Name)
+					}
+					return nil
+				},
+			},
+			{
+				Name:  "validate",
+				Usage: "validate a YAML or JSON SteamCMD game manifest",
+				Flags: []clipkg.Flag{
+					&clipkg.StringFlag{Name: "file", Required: true, Usage: "manifest file path"},
+				},
+				Action: func(ctx context.Context, cmd *clipkg.Command) error {
+					data, err := os.ReadFile(cmd.String("file"))
+					if err != nil {
+						return err
+					}
+					game, err := steamcmd.ParseGameManifest(data)
+					if err != nil {
+						return err
+					}
+					fmt.Printf("Valid game manifest: %s (%s, Steam app %d)\n", game.Name, game.Slug, game.AppID)
+					return nil
+				},
+			},
+			{
+				Name:  "add",
+				Usage: "add or replace a custom manifest in the active catalog",
+				Flags: []clipkg.Flag{
+					&clipkg.StringFlag{Name: "file", Required: true, Usage: "manifest file path (YAML or JSON)"},
+				},
+				Action: func(ctx context.Context, cmd *clipkg.Command) error {
+					data, err := os.ReadFile(cmd.String("file"))
+					if err != nil {
+						return err
+					}
+					game, err := steamcmd.ParseGameManifest(data)
+					if err != nil {
+						return err
+					}
+					paths := core.ResolvePaths(dataDirOf(cmd))
+					catalogPath := filepath.Join(paths.ConfigDir, "steamgames.json")
+					catalog, err := steamcmd.LoadCatalog(catalogPath)
+					if err != nil {
+						return err
+					}
+					if err := catalog.Upsert(game); err != nil {
+						return err
+					}
+					fmt.Printf("Game manifest %q added to %s\n", game.Slug, catalogPath)
+					return nil
+				},
+			},
+			{
+				Name:  "remove",
+				Usage: "remove a custom game manifest (built-ins cannot be removed)",
+				Flags: []clipkg.Flag{
+					&clipkg.StringFlag{Name: "slug", Required: true, Usage: "custom manifest slug"},
+				},
+				Action: func(ctx context.Context, cmd *clipkg.Command) error {
+					paths := core.ResolvePaths(dataDirOf(cmd))
+					catalog, err := steamcmd.LoadCatalog(filepath.Join(paths.ConfigDir, "steamgames.json"))
+					if err != nil {
+						return err
+					}
+					if err := catalog.DeleteCustom(cmd.String("slug")); err != nil {
+						return err
+					}
+					fmt.Printf("Custom game manifest %q removed\n", cmd.String("slug"))
 					return nil
 				},
 			},
@@ -442,8 +545,4 @@ func nodeCommand() *clipkg.Command {
 // systemPrincipal is a synthetic superuser principal for CLI ops.
 func systemPrincipal() *authz.Principal {
 	return &authz.Principal{Superuser: true, Username: "cli", Enabled: true}
-}
-
-func downloadTo(url string) ([]byte, error) {
-	return fetchURL(url)
 }

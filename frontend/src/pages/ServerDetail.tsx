@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
-  Terminal, FolderOpen, DatabaseBackup, CalendarClock, FileCog, BarChart3, Webhook as WebhookIcon, Settings2, Trash2, FileText,
+  Terminal, FolderOpen, DatabaseBackup, CalendarClock, FileCog, BarChart3, Webhook as WebhookIcon, Settings2, Trash2, FileText, RefreshCw,
 } from "lucide-react";
 import { useApi } from "@/hooks/useApi";
 import { GET, DEL, POST, ServerDef, realtime } from "@/api/client";
@@ -18,11 +18,20 @@ import Stats from "@/pages/server/Stats";
 import Webhooks from "@/pages/server/Webhooks";
 import Settings from "@/pages/server/Settings";
 
+interface ConfigFileInfo {
+  file: string;
+  mode: string;
+  format: string;
+  label?: string;
+  description?: string;
+  editor?: "lines";
+}
+
 export default function ServerDetail() {
   const { id } = useParams<{ id: string }>();
   const nav = useNavigate();
   const { data: server, refetch } = useApi<ServerDef>(`/servers/${id}`, { pollMs: 6000 });
-  const { data: configFiles, refetch: refetchConfigs } = useApi<any[]>(server ? `/servers/${id}/config` : null);
+  const { data: configFiles, refetch: refetchConfigs } = useApi<ConfigFileInfo[]>(server ? `/servers/${id}/config` : null);
   const [activeConfig, setActiveConfig] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
@@ -113,26 +122,44 @@ export default function ServerDetail() {
                   <Button variant="ghost" size="sm" className="mb-3" onClick={() => setActiveConfig(null)}>
                     ← all config files
                   </Button>
-                  <ConfigEditor serverId={server.server_id} file={activeConfig} />
+                  <ConfigEditor
+                    serverId={server.server_id}
+                    file={activeConfig}
+                    configInfo={configTabs.find((entry) => entry.file === activeConfig)}
+                  />
                 </div>
               ) : (
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  {configTabs.length === 0 ? (
-                    <div className="col-span-full py-10 text-center text-sm text-muted-foreground">
-                      No editable config files detected in the server directory.
-                    </div>
-                  ) : configTabs.map((f: any) => (
-                    <button key={f.file}
-                      onClick={() => setActiveConfig(f.file)}
-                      className="flex items-center gap-3 rounded-xl border bg-card p-4 text-left transition-all hover:border-primary/60 hover:shadow">
-                      <FileCog className="h-5 w-5 text-primary" />
-                      <div className="min-w-0">
-                        <div className="truncate font-mono text-sm">{f.file}</div>
-                        <div className="text-xs text-muted-foreground">{f.format} · {f.mode}</div>
+                <>
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                    <p className="text-sm text-muted-foreground">
+                      Showing supported files that exist in this server folder. Start the game once to generate manifest-declared files, then refresh.
+                    </p>
+                    <Button variant="outline" size="sm" onClick={() => refetchConfigs()}>
+                      <RefreshCw className="h-3.5 w-3.5" /> Refresh files
+                    </Button>
+                  </div>
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    {configTabs.length === 0 ? (
+                      <div className="col-span-full py-10 text-center text-sm text-muted-foreground">
+                        No editable config files detected yet. You can still browse the full server directory in Files.
                       </div>
-                    </button>
-                  ))}
-                </div>
+                    ) : configTabs.map((f) => (
+                      <button key={f.file}
+                        onClick={() => setActiveConfig(f.file)}
+                        className="flex items-start gap-3 rounded-xl border bg-card p-4 text-left transition-all hover:border-primary/60 hover:shadow">
+                        <FileCog className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-medium">{f.label || f.file}</div>
+                          {f.label && <div className="truncate font-mono text-xs text-muted-foreground">{f.file}</div>}
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            {f.editor === "lines" ? "Line list editor" : `${f.format} · ${f.mode}`}
+                          </div>
+                          {f.description && <div className="mt-1 text-xs text-muted-foreground/80">{f.description}</div>}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </>
               )}
             </TabsContent>
 

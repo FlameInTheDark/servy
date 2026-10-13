@@ -84,3 +84,47 @@ func TestManifestValidation(t *testing.T) {
 		t.Fatal("bad json accepted")
 	}
 }
+
+func TestManifestNormalizationAndSafety(t *testing.T) {
+	r := NewRegistry()
+	m, err := r.ParseManifest([]byte(`{"name":"Paper 1.21","jar_url":"https://downloads.example/paper.jar"}`))
+	if err != nil {
+		t.Fatalf("infer valid download recipe: %v", err)
+	}
+	if m.ID != "paper-1-21" || m.Type != "minecraft-java" || m.CreateType != "download_jar" || m.Version != "1" {
+		t.Fatalf("normalized manifest = %+v", m)
+	}
+
+	invalid := []string{
+		`{"name":"Bad URL","create_type":"download_jar","jar_url":"file:///etc/passwd"}`,
+		`{"name":"Missing raw fields","create_type":"raw_exec"}`,
+		`{"name":"Missing archive URL","create_type":"import_zip"}`,
+		`{"name":"Traversal","create_type":"raw_exec","executable":"run.sh","execution_command":"./run.sh","files":{"../../outside":"x"}}`,
+		`{"name":"Duplicate normalized paths","create_type":"raw_exec","executable":"run.sh","execution_command":"./run.sh","files":{"config//server.ini":"a","config/server.ini":"b"}}`,
+		`{"name":"Bad ID","id":"../escape","create_type":"raw_exec","executable":"run.sh","execution_command":"./run.sh"}`,
+		`{"name":"Bad ID ending","id":"bad-","create_type":"raw_exec","executable":"run.sh","execution_command":"./run.sh"}`,
+		`{"name":"Unknown key","create_type":"raw_exec","executable":"run.sh","execution_command":"./run.sh","exectuion_command":"typo"}`,
+		`{"name":"Property injection","create_type":"raw_exec","executable":"run.sh","execution_command":"./run.sh","config":{"motd":"hello\nserver-port=1"}}`,
+		`{"name":"Property key injection","create_type":"raw_exec","executable":"run.sh","execution_command":"./run.sh","config":{"motd\nserver-port":"1"}}`,
+		`{"name":"Embedded URL credentials","create_type":"download_jar","jar_url":"https://user:secret@downloads.example/server.jar"}`,
+		`{"name":"App ID overflow","create_type":"steam_game","type":"steam_cmd","app_id":"2147483648"}`,
+		`{"name":"App ID zero","create_type":"steam_game","type":"steam_cmd","app_id":"0"}`,
+		`{"name":"App ID sign","create_type":"steam_game","type":"steam_cmd","app_id":"+123"}`,
+		`{"name":"Options on raw recipe","create_type":"raw_exec","executable":"run.sh","execution_command":"./run.sh","steam_options":{"password":"secret"}}`,
+	}
+	for _, raw := range invalid {
+		if _, err := r.ParseManifest([]byte(raw)); err == nil {
+			t.Errorf("unsafe or incomplete manifest accepted: %s", raw)
+		}
+	}
+
+	steamRecipe, err := r.ParseManifest([]byte(`{"name":"Valheim","create_type":"steam_game","type":"steam_cmd","app_id":"896660","steam_options":{"password":"not-a-real-secret"}}`))
+	if err != nil || steamRecipe.SteamOptions["password"] != "not-a-real-secret" {
+		t.Fatalf("steam recipe = %+v, err=%v", steamRecipe, err)
+	}
+
+	zipManifest, err := r.ParseManifest([]byte(`{"name":"Imported","archive_url":"https://downloads.example/server.zip"}`))
+	if err != nil || zipManifest.CreateType != "import_zip" {
+		t.Fatalf("zip manifest = %+v, err=%v", zipManifest, err)
+	}
+}

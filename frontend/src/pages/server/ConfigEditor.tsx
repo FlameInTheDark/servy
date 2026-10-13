@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { FileCog, Code2, Eye, Save, CheckCircle2 } from "lucide-react";
+import { FileCog, Code2, Eye, Save, CheckCircle2, Plus, Trash2 } from "lucide-react";
 import { GET, PUT } from "@/api/client";
 import { Button, Input, Switch, Badge, Skeleton } from "@/components/ui/primitives";
 import { SimpleSelect, Tabs, TabsList, TabsTrigger } from "@/components/ui/overlays";
@@ -12,22 +12,29 @@ interface FormField {
   label?: string; help?: string; section?: string;
 }
 interface FormSection { id: string; label: string; fields: FormField[] }
+interface ConfigFileInfo { label?: string; description?: string; editor?: "lines" }
 
-export default function ConfigEditor({ serverId, file }: { serverId: string; file: string }) {
+export default function ConfigEditor({ serverId, file, configInfo }: { serverId: string; file: string; configInfo?: ConfigFileInfo }) {
   const [sections, setSections] = useState<FormSection[]>([]);
   const [raw, setRaw] = useState("");
+  const [listEntries, setListEntries] = useState<string[]>([]);
   const [mode, setMode] = useState<"visual" | "raw">("visual");
   const [loading, setLoading] = useState(true);
   const [dirty, setDirty] = useState(false);
   const [jsonError, setJsonError] = useState<string | null>(null);
+  const configEndpoint = `/servers/${serverId}/config-file?path=${encodeURIComponent(file)}`;
+  const isLines = configInfo?.editor === "lines";
 
   useEffect(() => {
     setLoading(true);
-    GET<any>(`/servers/${serverId}/config/${encodeURIComponent(file)}`)
+    GET<any>(configEndpoint)
       .then((res) => {
         if (res.form) setSections(res.form.sections || []);
-        setRaw(res.content || "");
+        const content = res.content || "";
+        setRaw(content);
+        setListEntries(content.replace(/\r\n?/g, "\n").split("\n").filter((line: string) => line.trim() !== ""));
         setMode(res.form ? "visual" : "raw");
+        setDirty(false);
       })
       .catch((e) => toast.error(e.message))
       .finally(() => setLoading(false));
@@ -43,11 +50,23 @@ export default function ConfigEditor({ serverId, file }: { serverId: string; fil
   };
 
   const save = async () => {
+    if (isLines) {
+      const content = listEntries.map((entry) => entry.trim()).filter(Boolean).join("\n");
+      try {
+        await PUT(configEndpoint, { mode: "raw", content: content ? `${content}\n` : "" });
+        setRaw(content ? `${content}\n` : "");
+        toast.success("Saved list");
+        setDirty(false);
+      } catch (e: any) {
+        toast.error(e.message);
+      }
+      return;
+    }
     if (mode === "visual") {
       const values: Record<string, string> = {};
       sections.forEach((s) => s.fields.forEach((f) => (values[f.key] = f.value)));
       try {
-        await PUT(`/servers/${serverId}/config/${encodeURIComponent(file)}`, { mode: "visual", values });
+        await PUT(configEndpoint, { mode: "visual", values });
         toast.success("Saved (visual)");
         setDirty(false);
       } catch (e: any) {
@@ -65,7 +84,7 @@ export default function ConfigEditor({ serverId, file }: { serverId: string; fil
         }
       }
       try {
-        await PUT(`/servers/${serverId}/config/${encodeURIComponent(file)}`, {
+        await PUT(configEndpoint, {
           mode: file.endsWith(".json") ? "json" : "raw", content: raw,
         });
         toast.success("Saved");
@@ -76,14 +95,17 @@ export default function ConfigEditor({ serverId, file }: { serverId: string; fil
     }
   };
 
-  const isProperties = file.endsWith(".properties");
+  const isProperties = file.toLowerCase().endsWith(".properties");
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <FileCog className="h-5 w-5 text-primary" />
-          <span className="font-mono text-sm">{file}</span>
+        <div className="flex min-w-0 items-center gap-2">
+          <FileCog className="h-5 w-5 shrink-0 text-primary" />
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium">{configInfo?.label || file}</div>
+            {configInfo?.label && <div className="truncate font-mono text-xs text-muted-foreground">{file}</div>}
+          </div>
           {dirty && <Badge variant="warning">unsaved</Badge>}
         </div>
         <div className="flex items-center gap-2">
@@ -103,6 +125,45 @@ export default function ConfigEditor({ serverId, file }: { serverId: string; fil
 
       {loading ? (
         <Skeleton className="h-96" />
+      ) : isLines ? (
+        <div className="space-y-3">
+          {configInfo?.description && <p className="text-sm text-muted-foreground">{configInfo.description}</p>}
+          {listEntries.length === 0 ? (
+            <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">No entries yet. Add a player ID below.</div>
+          ) : (
+            <div className="space-y-2">
+              {listEntries.map((entry, index) => (
+                <div key={`${index}-${entry}`} className="flex items-center gap-2">
+                  <span className="w-7 shrink-0 text-right text-xs text-muted-foreground">{index + 1}</span>
+                  <Input
+                    value={entry}
+                    aria-label={`List entry ${index + 1}`}
+                    onChange={(e) => {
+                      setListEntries((entries) => entries.map((current, i) => i === index ? e.target.value : current));
+                      setDirty(true);
+                    }}
+                    className="font-mono text-sm"
+                  />
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label={`Remove list entry ${index + 1}`}
+                    onClick={() => {
+                      setListEntries((entries) => entries.filter((_, i) => i !== index));
+                      setDirty(true);
+                    }}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+          <Button variant="outline" size="sm" onClick={() => { setListEntries((entries) => [...entries, ""]); setDirty(true); }}>
+            <Plus className="h-4 w-4" /> Add entry
+          </Button>
+          <p className="text-xs text-muted-foreground">One value per line. Save when finished; the file itself is not changed until you do.</p>
+        </div>
       ) : mode === "visual" && sections.length > 0 ? (
         <div className="space-y-5">
           {sections.map((sec) => (

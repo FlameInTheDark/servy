@@ -14,6 +14,7 @@ import (
 	"github.com/FlameInTheDark/servy/internal/backups"
 	"github.com/FlameInTheDark/servy/internal/repo/gen"
 	"github.com/FlameInTheDark/servy/internal/scheduler"
+	"github.com/FlameInTheDark/servy/internal/servers"
 )
 
 // readZipInfo summarizes an archive for the wizard (top dirs + executables).
@@ -120,7 +121,7 @@ func (a *App) createBackup(c fiber.Ctx) error {
 	}
 	location := req.Location
 	if location == "" {
-		location = filepath.Join(a.BackupRoot, def.ServerName)
+		location = filepath.Join(a.BackupRoot, servers.SanitizeServerName(def.ServerName))
 	}
 	excluded := strings.Join(req.ExcludedDirs, ",")
 	btype := req.BackupType

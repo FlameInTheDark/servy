@@ -1,13 +1,14 @@
 package httpapi
 
 import (
-	"runtime"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -16,8 +17,12 @@ import (
 	"github.com/FlameInTheDark/servy/internal/authz"
 	"github.com/FlameInTheDark/servy/internal/config"
 	"github.com/FlameInTheDark/servy/internal/configedit"
+	"github.com/FlameInTheDark/servy/internal/creation"
+	"github.com/FlameInTheDark/servy/internal/events"
 	"github.com/FlameInTheDark/servy/internal/repo/gen"
+	"github.com/FlameInTheDark/servy/internal/safehttp"
 	"github.com/FlameInTheDark/servy/internal/servers"
+	"github.com/FlameInTheDark/servy/internal/steamcmd"
 	"github.com/FlameInTheDark/servy/internal/version"
 )
 
@@ -40,7 +45,12 @@ func (a *App) mountPanel(api fiber.Router) {
 	g.Get("/support_logs/status", a.supportLogsStatus)
 	g.Get("/JarCache", a.jarCache)
 	g.Get("/SteamCache", a.steamCache)
-	g.Get("/SteamCatalog", a.steamCatalog)
+	g.Get("/SteamCatalog", a.steamCatalog) // compatibility alias
+	g.Get("/steam/catalog", a.steamCatalog)
+	g.Get("/steam/catalog/custom", a.customSteamCatalog)
+	g.Post("/steam/catalog/custom/validate", a.validateSteamManifest)
+	g.Post("/steam/catalog/custom", a.saveSteamManifest)
+	g.Delete("/steam/catalog/custom/:slug", a.deleteSteamManifest)
 
 	// execution environment
 	g.Get("/java", a.panelJavaInstalls)
@@ -430,11 +440,82 @@ func (a *App) steamCache(c fiber.Ctx) error {
 	return ok(c, m)
 }
 
+type steamCatalogEntry struct {
+	steamcmd.Game
+	Custom bool `json:"custom"`
+}
+
 func (a *App) steamCatalog(c fiber.Ctx) error {
 	if a.requireAuth(c) == nil {
 		return nil
 	}
-	return ok(c, a.Creation.SteamCatalog())
+	games := a.SteamCatalog.All()
+	out := make([]steamCatalogEntry, 0, len(games))
+	for _, game := range games {
+		out = append(out, steamCatalogEntry{Game: game, Custom: a.SteamCatalog.IsCustom(game.Slug)})
+	}
+	return ok(c, out)
+}
+
+func (a *App) customSteamCatalog(c fiber.Ctx) error {
+	if a.requireSuperuser(c) == nil {
+		return nil
+	}
+	return ok(c, a.SteamCatalog.CustomAll())
+}
+
+func (a *App) validateSteamManifest(c fiber.Ctx) error {
+	if a.requireSuperuser(c) == nil {
+		return nil
+	}
+	game, err := a.parseSteamManifest(c)
+	if err != nil {
+		return failMsg(c, 400, "INVALID_MANIFEST", err.Error())
+	}
+	return ok(c, game)
+}
+
+func (a *App) saveSteamManifest(c fiber.Ctx) error {
+	if a.requireSuperuser(c) == nil {
+		return nil
+	}
+	game, err := a.parseSteamManifest(c)
+	if err != nil {
+		return failMsg(c, 400, "INVALID_MANIFEST", err.Error())
+	}
+	if err := a.SteamCatalog.Upsert(game); err != nil {
+		return failMsg(c, 400, "INVALID_MANIFEST", err.Error())
+	}
+	a.Log.Audit("api", userIDOf(c), "", c.IP(), fmt.Sprintf("Updated Steam game manifest %s", game.Slug))
+	a.Bus.PublishSimple("steam_catalog_update", map[string]string{"slug": game.Slug})
+	return ok(c, steamCatalogEntry{Game: game, Custom: true})
+}
+
+func (a *App) deleteSteamManifest(c fiber.Ctx) error {
+	p := a.requireSuperuser(c)
+	if p == nil {
+		return nil
+	}
+	slug := c.Params("slug")
+	if err := a.SteamCatalog.DeleteCustom(slug); err != nil {
+		return failMsg(c, 404, "NOT_FOUND", err.Error())
+	}
+	a.Log.Audit("api", p.UserID, "", c.IP(), fmt.Sprintf("Removed Steam game manifest %s", slug))
+	a.Bus.PublishSimple("steam_catalog_update", map[string]string{"slug": slug, "deleted": "true"})
+	return ok(c, fiber.Map{"deleted": slug})
+}
+
+func (a *App) parseSteamManifest(c fiber.Ctx) (steamcmd.Game, error) {
+	if len(c.Body()) > steamcmd.MaxGameManifestSize+4096 {
+		return steamcmd.Game{}, fmt.Errorf("manifest exceeds the %d-byte limit", steamcmd.MaxGameManifestSize)
+	}
+	var req struct {
+		Manifest string `json:"manifest"`
+	}
+	if err := json.Unmarshal(c.Body(), &req); err != nil {
+		return steamcmd.Game{}, fmt.Errorf("invalid request JSON: %w", err)
+	}
+	return steamcmd.ParseGameManifest([]byte(req.Manifest))
 }
 
 func (a *App) adminUpload(c fiber.Ctx) error {
@@ -804,11 +885,16 @@ func (a *App) listManifests(c fiber.Ctx) error {
 	if a.requireAuth(c) == nil {
 		return nil
 	}
-	rows, _ := a.DB.ListDefinitions()
+	rows, err := a.DB.ListDefinitions()
+	if err != nil {
+		return failMsg(c, 500, "SERVER_ERROR", err.Error())
+	}
 	out := []map[string]interface{}{}
 	for _, d := range rows {
 		var m map[string]interface{}
-		json.Unmarshal([]byte(d.Definition), &m)
+		if err := json.Unmarshal([]byte(d.Definition), &m); err != nil || m == nil {
+			m = map[string]interface{}{"name": d.Name, "type": d.Type, "invalid": true}
+		}
 		m["definition_id"] = d.DefinitionID
 		m["source"] = d.Source
 		out = append(out, m)
@@ -820,6 +906,9 @@ func (a *App) addManifest(c fiber.Ctx) error {
 	p := a.requireSuperuser(c)
 	if p == nil {
 		return nil
+	}
+	if len(c.Body()) > (4<<20)+8192 {
+		return failMsg(c, 413, "INVALID_MANIFEST", "manifest exceeds the 4 MiB limit")
 	}
 	var req struct {
 		URL  string `json:"url"`
@@ -841,14 +930,21 @@ func (a *App) addManifest(c fiber.Ctx) error {
 	if err != nil {
 		return failMsg(c, 400, "INVALID_MANIFEST", err.Error())
 	}
-	raw, _ := json.Marshal(m)
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return failMsg(c, 500, "SERVER_ERROR", err.Error())
+	}
 	now := databaseNow()
 	mver := m.Version
 	empty := ""
-	emptyP := &empty
-	if err := a.DB.UpsertDefinition(m.ID, m.Name, m.Type, emptyP, string(raw), "url", &mver, now, now); err != nil {
+	source := "inline"
+	if req.URL != "" {
+		source = "url"
+	}
+	if err := a.DB.UpsertDefinition(m.ID, m.Name, m.Type, &empty, string(raw), source, &mver, now, now); err != nil {
 		return failMsg(c, 400, err.Error(), err.Error())
 	}
+	a.Log.Audit("api", p.UserID, "", c.IP(), fmt.Sprintf("Stored server manifest %s", m.ID))
 	return ok(c, m)
 }
 
@@ -861,7 +957,9 @@ func (a *App) getManifest(c fiber.Ctx) error {
 		return fail(c, 404, "NOT_FOUND")
 	}
 	var m map[string]interface{}
-	json.Unmarshal([]byte(d.Definition), &m)
+	if err := json.Unmarshal([]byte(d.Definition), &m); err != nil || m == nil {
+		return failMsg(c, 500, "INVALID_MANIFEST", "stored definition is invalid")
+	}
 	return ok(c, m)
 }
 
@@ -884,6 +982,9 @@ func (a *App) applyManifest(c fiber.Ctx) error {
 	if !p.CanPanel(authz.PanelServerCreation) {
 		return fail(c, 403, "NOT_AUTHORIZED")
 	}
+	if !p.Superuser && p.LimitServers >= 0 && int64(len(p.ServerIDs())) >= p.LimitServers {
+		return failMsg(c, 403, "LIMIT_REACHED", "server creation limit reached")
+	}
 	var req struct {
 		DefinitionID string `json:"definition_id"`
 		URL          string `json:"url"`
@@ -892,58 +993,215 @@ func (a *App) applyManifest(c fiber.Ctx) error {
 	if err := parseBody(c, &req); err != nil {
 		return err
 	}
-	var raw string
+
+	var manifest *configedit.Manifest
 	if req.DefinitionID != "" {
-		d, err := a.DB.GetDefinition(req.DefinitionID)
+		definition, err := a.DB.GetDefinition(req.DefinitionID)
 		if err != nil {
 			return fail(c, 404, "NOT_FOUND")
 		}
-		raw = d.Definition
-	} else if req.URL != "" {
-		m, err := configedit.NewRegistry().FromURL(req.URL)
+		manifest, err = configedit.NewRegistry().ParseManifest([]byte(definition.Definition))
 		if err != nil {
 			return failMsg(c, 400, "INVALID_MANIFEST", err.Error())
 		}
-		b, _ := json.Marshal(m)
-		raw = string(b)
+	} else if req.URL != "" {
+		var err error
+		manifest, err = configedit.NewRegistry().FromURL(req.URL)
+		if err != nil {
+			return failMsg(c, 400, "INVALID_MANIFEST", err.Error())
+		}
 	} else {
 		return failMsg(c, 400, "INVALID_JSON_SCHEMA", "definition_id or url required")
 	}
-	var m configedit.Manifest
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+
+	preparedFiles, err := stageManifestFiles(*manifest)
+	if err != nil {
 		return failMsg(c, 400, "INVALID_MANIFEST", err.Error())
 	}
-	name := req.Name
+	name := strings.TrimSpace(req.Name)
 	if name == "" {
-		name = m.Name
+		name = manifest.Name
 	}
+	hasPostCreateConfig := len(preparedFiles) > 0 || len(manifest.Config) > 0 || len(manifest.Env) > 0
+	deferAutoStart := hasPostCreateConfig && manifest.AutoStart
 	cr := creationRequest{
-		CreateType: orStr(m.CreateType, "download_jar"), Name: name, ServerType: m.Type,
-		Port: m.Port, JarURL: m.JarURL, SteamSlug: m.SteamSlug, AppID: m.AppID,
-		MinMem: m.MinMem, MaxMem: m.MaxMem, StopCommand: m.StopCommand,
-		Executable: m.Executable, ExecutionCommand: m.ExecutionCommand,
+		CreateType: manifest.CreateType, Name: name, ServerType: manifest.Type,
+		Port: manifest.Port, JarURL: manifest.JarURL, SteamSlug: manifest.SteamSlug,
+		AppID: manifest.AppID, SteamOptions: manifest.SteamOptions, MinMem: manifest.MinMem, MaxMem: manifest.MaxMem,
+		StopCommand: manifest.StopCommand, Executable: manifest.Executable,
+		ExecutionCommand: manifest.ExecutionCommand, JavaSelection: manifest.JavaSelection,
+		Shell: manifest.Shell, ExecutionBackend: manifest.ExecutionBackend,
+		DockerImage: manifest.DockerImage, DockerEnv: manifest.DockerEnv,
+		DockerPorts: manifest.DockerPorts, DockerBinds: manifest.DockerBinds,
+		DockerNetwork: manifest.DockerNetwork, DockerWorkdir: manifest.DockerWorkdir,
+		DockerAutoremove: manifest.DockerAutoremove, AutoStart: manifest.AutoStart && !deferAutoStart,
+		CrashDetection: manifest.CrashDetection,
+	}
+	archivePath := ""
+	if manifest.CreateType == creation.CreateImportZip {
+		archivePath, err = downloadManifestArchive(manifest.ArchiveURL, a.ImportDir)
+		if err != nil {
+			return failMsg(c, 400, "MANIFEST_DOWNLOAD_FAILED", err.Error())
+		}
+		cr.ArchivePath = archivePath
 	}
 	res, err := a.Creation.Create(cr.toCreationRequest(), p.UserID)
-	if err != nil {
-		return failMsg(c, 400, err.Error(), err.Error())
+	if archivePath != "" {
+		_ = os.Remove(archivePath)
 	}
-	// apply config overrides (server.properties) + env.json + extra files
-	if len(m.Config) > 0 || len(m.Env) > 0 {
-		if sup, err := a.Registry.Get(res.ServerID); err == nil {
-			if len(m.Config) > 0 {
-				doc := configedit.ParseProperties("")
-				for k, v := range m.Config {
-					doc.Set(k, v)
-				}
-				a.Files.Write(newGuard(sup.Definition().Path), "server.properties", []byte(configedit.RenderProperties(doc)))
+	if err != nil {
+		return failMsg(c, 400, "SERVER_CREATE_FAILED", err.Error())
+	}
+
+	rollback := func(cause error) error {
+		if cleanupErr := a.Registry.Delete(res.ServerID, true, p.UserID); cleanupErr != nil {
+			a.Log.Get("server").Error("failed to roll back manifest-created server %s: %v", res.ServerID, cleanupErr)
+			if dbErr := a.DB.DeleteServer(res.ServerID); dbErr != nil {
+				a.Log.Get("server").Error("failed to remove rolled-back server row %s: %v", res.ServerID, dbErr)
 			}
-			if len(m.Env) > 0 {
-				b, _ := json.MarshalIndent(m.Env, "", "  ")
-				a.Files.Write(newGuard(sup.Definition().Path), "env.json", b)
+			if a.ServersRoot != "" {
+				if fileErr := os.RemoveAll(filepath.Join(a.ServersRoot, res.ServerID)); fileErr != nil {
+					a.Log.Get("server").Error("failed to remove rolled-back server files %s: %v", res.ServerID, fileErr)
+				}
+			}
+		}
+		return failMsg(c, 500, "MANIFEST_APPLY_FAILED", cause.Error())
+	}
+	if hasPostCreateConfig {
+		sup, err := a.Registry.Get(res.ServerID)
+		if err != nil {
+			return rollback(err)
+		}
+		guard, err := files.NewGuard(sup.Definition().Path)
+		if err != nil {
+			return rollback(err)
+		}
+		for _, file := range preparedFiles {
+			if err := a.Files.Write(guard, file.Path, file.Data); err != nil {
+				return rollback(err)
+			}
+		}
+		if len(manifest.Config) > 0 {
+			doc := configedit.ParseProperties("")
+			for key, value := range manifest.Config {
+				doc.Set(key, value)
+			}
+			if err := a.Files.Write(guard, "server.properties", []byte(configedit.RenderProperties(doc))); err != nil {
+				return rollback(err)
+			}
+		}
+		if len(manifest.Env) > 0 {
+			data, err := json.MarshalIndent(manifest.Env, "", "  ")
+			if err != nil {
+				return rollback(err)
+			}
+			if err := a.Files.Write(guard, "env.json", data); err != nil {
+				return rollback(err)
 			}
 		}
 	}
+	if deferAutoStart {
+		if err := a.Registry.UpdateConfig(res.ServerID, func(def *gen.Server) { def.AutoStart = 1 }); err != nil {
+			return rollback(err)
+		}
+		a.Bus.Publish(events.Event{Type: events.EvSendStartReload, ServerID: res.ServerID,
+			Data: map[string]interface{}{"server_id": res.ServerID, "created": true}})
+	}
 	return ok(c, res)
+}
+
+type preparedManifestFile struct {
+	Path string
+	Data []byte
+}
+
+func stageManifestFiles(manifest configedit.Manifest) ([]preparedManifestFile, error) {
+	files := make([]preparedManifestFile, 0, len(manifest.Files))
+	total := int64(0)
+	for name, value := range manifest.Files {
+		var data []byte
+		if strings.HasPrefix(value, "https://") || strings.HasPrefix(value, "http://") {
+			var err error
+			data, err = downloadManifestFile(value)
+			if err != nil {
+				return nil, fmt.Errorf("download file %q: %w", name, err)
+			}
+		} else {
+			data = []byte(value)
+		}
+		total += int64(len(data))
+		if total > 16<<20 {
+			return nil, fmt.Errorf("manifest files exceed the 16 MiB total limit")
+		}
+		files = append(files, preparedManifestFile{Path: filepath.FromSlash(strings.ReplaceAll(name, `\`, "/")), Data: data})
+	}
+	return files, nil
+}
+
+func downloadManifestFile(rawURL string) ([]byte, error) {
+	client := safehttp.NewClient(30 * time.Second)
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP status %d", response.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, (4<<20)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > 4<<20 {
+		return nil, fmt.Errorf("file exceeds the 4 MiB limit")
+	}
+	return data, nil
+}
+
+func downloadManifestArchive(rawURL, importDir string) (string, error) {
+	if err := os.MkdirAll(importDir, 0o755); err != nil {
+		return "", err
+	}
+	file, err := os.CreateTemp(importDir, "manifest-archive-*.zip")
+	if err != nil {
+		return "", err
+	}
+	filePath := file.Name()
+	cleanup := func(cause error) (string, error) {
+		file.Close()
+		os.Remove(filePath)
+		return "", cause
+	}
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, rawURL, nil)
+	if err != nil {
+		return cleanup(err)
+	}
+	client := safehttp.NewClient(15 * time.Minute)
+	response, err := client.Do(request)
+	if err != nil {
+		return cleanup(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return cleanup(fmt.Errorf("HTTP status %d", response.StatusCode))
+	}
+	const maxArchiveSize = int64(2 << 30)
+	written, err := io.Copy(file, io.LimitReader(response.Body, maxArchiveSize+1))
+	if err != nil {
+		return cleanup(err)
+	}
+	if written > maxArchiveSize {
+		return cleanup(fmt.Errorf("archive exceeds the 2 GiB limit"))
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(filePath)
+		return "", err
+	}
+	return filePath, nil
 }
 
 // ---------------- audit ----------------
