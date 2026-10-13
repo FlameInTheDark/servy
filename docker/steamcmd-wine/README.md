@@ -23,9 +23,13 @@ docker build -t servy-wine:latest docker/steamcmd-wine
 
 ### Non-root uid/gid
 
-The container runs as user `gameserver` (uid/gid 1000 by default — the typical first host user, so bind mounts keep sane ownership). `ubuntu:24.04+` ships a pre-installed `ubuntu` user that already occupies uid/gid 1000; the build removes that account automatically before creating `gameserver`.
+The image defaults to non-root `gameserver` (uid/gid 1000) and includes a pre-initialized Wine prefix. Servy may override the container uid/gid to match ownership of the mounted server files. At startup the entrypoint checks both write access and prefix ownership; if they differ, it creates/reuses a private Wine prefix under `/tmp` for that uid. This avoids Wine's `prefix is not owned by you` error when the container runs as root or another host uid. Windows `.exe` launches also skip the Linux-only `steamclient.so` wiring step.
 
-If your host user has a different uid, rebuild with matching ids so bind mounted files stay writable:
+If you are on an older image and see `wine: '/home/gameserver/.wine' is not owned by you`, temporarily add `WINEPREFIX=/tmp/wine-prefix` to that server's Docker environment and restart it. Servy creates a fresh container for each start, so the temporary prefix is initialized for the active container user. Remove the override after updating to an image with the ownership-aware entrypoint.
+
+`ubuntu:24.04+` ships a pre-installed `ubuntu` user that already occupies uid/gid 1000; the build removes that account automatically before creating `gameserver`.
+
+If your host user has a different uid, rebuild with matching ids so bind-mounted game files stay writable (the runtime prefix fallback still handles a mismatch safely):
 
 ```bash
 docker build \
