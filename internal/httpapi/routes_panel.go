@@ -19,6 +19,7 @@ import (
 	"github.com/FlameInTheDark/servy/internal/configedit"
 	"github.com/FlameInTheDark/servy/internal/creation"
 	"github.com/FlameInTheDark/servy/internal/events"
+	"github.com/FlameInTheDark/servy/internal/files"
 	"github.com/FlameInTheDark/servy/internal/repo/gen"
 	"github.com/FlameInTheDark/servy/internal/safehttp"
 	"github.com/FlameInTheDark/servy/internal/servers"
