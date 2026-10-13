@@ -3,7 +3,6 @@ package configedit
 import (
 	"errors"
 	"io"
-	"net/http"
 	"time"
 
 	"github.com/FlameInTheDark/servy/internal/safehttp"
