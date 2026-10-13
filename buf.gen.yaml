@@ -1,0 +1,15 @@
+# buf codegen config — regenerates internal/cluster/pb from proto/node.proto.
+#
+#   PATH="$HOME/go/bin:$PATH" buf generate proto
+#
+# Equivalent to the protoc invocation in the Makefile:
+#   protoc --proto_path=proto --go_out=. --go_opt=module=github.com/FlameInTheDark/servy \
+#     --go-grpc_out=. --go-grpc_opt=module=github.com/FlameInTheDark/servy proto/node.proto
+version: v1
+plugins:
+  - plugin: go
+    out: .
+    opt: module=github.com/FlameInTheDark/servy
+  - plugin: go-grpc
+    out: .
+    opt: module=github.com/FlameInTheDark/servy

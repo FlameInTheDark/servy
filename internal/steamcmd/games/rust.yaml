@@ -1,0 +1,23 @@
+app_id: 258550
+slug: "rust"
+name: "Rust"
+run_command: './RustDedicated -batchmode +server.port {PORT} +server.hostname "{SERVER_NAME}" +server.identity server'
+executable: "RustDedicated"
+stop_command: "quit"
+port: 28015
+port_name: "game"
+# Rust game + Steam A2S query live on the game port (UDP). The RCON/app TCP
+# port defaults to 28016 and is only open once +rcon.password is configured.
+expose:
+  # no explicit port: follows the server's configured game port (remappable)
+  - proto: udp
+  - port: 28016
+    proto: tcp
+    optional: true
+save_dirs:
+  - "server/identity"
+backup_dirs:
+  - "server/identity"
+  - "server/server.cfg"
+  - "server/config"
+  - "server/rconpassword.txt"

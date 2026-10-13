@@ -1,0 +1,64 @@
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test files
+*_test.go
+*_test.py
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Frontend node_modules (not needed in build context)
+frontend/node_modules
+frontend/dist
+
+# Logs
+*.log
+logs/
+
+# Servers directory (data)
+servers/
+
+# Config (generated)
+config/
+
+# Runtime data (dev sqlite db, logs, downloaded servers) — must not leak into
+# the build context
+/data/
+
+# Wine image lives in its own build context (docker/steamcmd-wine), the panel
+# image does not need it
+docker/
+
+# CI / release tooling — not needed at image runtime
+.github/
+
+# Go build cache (keep go.mod and go.sum for build)
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+*.dockerfile
+
+# Documentation
+*.md
+!README.md

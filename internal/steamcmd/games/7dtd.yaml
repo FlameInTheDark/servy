@@ -1,0 +1,30 @@
+app_id: 294420
+slug: "7dtd"
+name: "7 Days to Die"
+run_command: './7DaysToDieServer.x86_64 -configfile=serverconfig.xml -quit -batchmode -nographics -dedicated'
+executable: "7DaysToDieServer.x86_64"
+stop_command: "shutdown"
+port: 26900
+port_name: "game"
+# 26900/udp carries game + Steam A2S query; 26901/26902/udp are used for
+# additional Steam networking features. Values are configurable in
+# serverconfig.xml and must match the published ports there.
+expose:
+  # no explicit port: follows the server's configured game port (remappable)
+  - proto: udp
+  - offset: 1
+    proto: udp
+    optional: true
+  - offset: 2
+    proto: udp
+    optional: true
+config_files:
+  - "serverconfig.xml"
+save_dirs:
+  - "Data/Worlds"
+  - "Saves"
+backup_dirs:
+  - "Data/Worlds"
+  - "Saves"
+  - "serverconfig.xml"
+  - "Data/Users"

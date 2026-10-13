@@ -1,0 +1,31 @@
+app_id: 2857200
+slug: "abiotic-factor"
+name: "Abiotic Factor"
+run_command: './AbioticFactor/Binaries/Win64/AbioticFactorServer-Win64-Shipping.exe -log -newconsole -useperfthreads -MaxServerPlayers=6 -PORT={PORT} -QueryPort={QUERY_PORT} -SteamServerName="{SERVER_NAME}"'
+executable: "AbioticFactor/Binaries/Win64/AbioticFactorServer-Win64-Shipping.exe"
+stop_command: "quit"
+port: 7777
+port_name: "game"
+query_port: 27015
+platform: "windows"
+windows_only: true
+# Wine + SteamCMD image shipped by this repo (docker/steamcmd-wine, published
+# as ghcr.io/flameinthedark/servy-wine by CI). The vanilla steamcmd image has
+# no Wine and cannot run the Windows server binary.
+docker_image: "ghcr.io/flameinthedark/servy-wine:latest"
+notes: "Windows-only dedicated server. Runs in the servy-wine container; SteamCMD fetches the Windows depot. Both ports are UDP. Recommended: 6 players."
+expose:
+  # no explicit port: follows the server's configured game port (remappable)
+  - proto: udp
+  - port: 27015
+    proto: udp
+    optional: true
+config_files:
+  - "AbioticFactor/Saved/Config/WindowsServer/GameUserSettings.ini"
+  - "AbioticFactor/Saved/Config/WindowsServer/Game.ini"
+  - "AbioticFactor/Saved/SaveGames/Server/Admin.ini"
+save_dirs:
+  - "AbioticFactor/Saved/SaveGames/Server/Worlds"
+backup_dirs:
+  - "AbioticFactor/Saved/SaveGames/Server"
+  - "AbioticFactor/Saved/Config"

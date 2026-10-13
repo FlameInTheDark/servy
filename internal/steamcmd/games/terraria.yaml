@@ -1,0 +1,26 @@
+app_id: 105600
+slug: "terraria"
+name: "Terraria (TShock)"
+# Expects the TShock server files under ./tshock (TShock ships its own
+# TerrariaServer binary; the Steam depot alone only provides the vanilla
+# server). -autocreate generates the world on first boot so the server
+# starts headless without the interactive world wizard.
+run_command: './tshock/TerrariaServer -port {PORT} -world {SAVE_DIR}/servy.wld -autocreate 2'
+executable: "tshock/TerrariaServer"
+stop_command: "exit"
+port: 7777
+port_name: "game"
+notes: "Upload TShock into the tshock/ folder first (the Steam depot does not include it). Worlds are auto-created under saves/ on first start."
+# Terraria is TCP-only (the TShock REST API shares the port when enabled).
+expose:
+  # no explicit port: follows the server's configured game port (remappable)
+  - proto: tcp
+save_dirs:
+  - "tshock/Worlds"
+  - "tshock/tshock"
+  - "saves"
+backup_dirs:
+  - "tshock/Worlds"
+  - "tshock/tshock"
+  - "tshock/ServerConfig.txt"
+  - "saves"

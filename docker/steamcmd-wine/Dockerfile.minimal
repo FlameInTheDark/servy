@@ -1,0 +1,97 @@
+# syntax=docker/dockerfile:1
+# ==============================================================================
+# Servy Wine + SteamCMD base image — MINIMAL variant
+#
+# Faithful to the original example (Pleut/abiotic-factor-linux-docker: distro
+# packages only) but with the example's real bugs fixed:
+#   * wine32 (i386) was missing — 32-bit game servers and steamcmd itself
+#     require it; the example installed wine64 only.
+#   * Xvfb was missing — Wine often needs a (virtual) display; headless-only
+#     setups crash on many servers.
+#   * ran as root — now a dedicated non-root user with a pre-built prefix.
+#   * the example's entrypoint was Abiotic-Factor-specific and ignored
+#     RUN_CMD — the shared universal entrypoint.sh is used instead.
+#
+# For modern Unreal/UE5 titles prefer the main Dockerfile (WineHQ, up-to-date
+# wine); this variant uses the distro wine 9.0 + distro steamcmd (2018 base,
+# self-updating) and stays small.
+#
+# amd64 only (Wine + 32-bit steamcmd need i386 on amd64).
+# ==============================================================================
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# hadolint ignore=DL3008
+RUN dpkg --add-architecture i386 \
+ && apt-get update \
+ && echo steam steam/question select "I AGREE" | debconf-set-selections \
+ && echo steam steam/license note '' | debconf-set-selections \
+ && apt-get install -y --no-install-recommends \
+      wine wine64 wine32 \
+      steamcmd \
+      xvfb xauth tini procps locales ca-certificates curl \
+ && apt-get clean autoclean \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/* \
+ && locale-gen en_US.UTF-8 \
+ && update-locale LANG=en_US.UTF-8
+
+# /usr/games holds the distro steamcmd wrapper
+ENV PATH="$PATH:/usr/games"
+
+# ---- Non-root user ------------------------------------------------------------
+# ubuntu:24.04+ ships a pre-installed `ubuntu` user on uid/gid 1000 — remove
+# whoever holds the target ids first, otherwise useradd fails with
+# "UID 1000 is not unique" (build-breaking on noble).
+# The distro steamcmd keeps its self-updating bits under /usr/lib/steam — make
+# them writable by the runtime user as well.
+ARG GAMESERVER_UID=1000
+ARG GAMESERVER_GID=1000
+RUN set -eu; \
+    uid="${GAMESERVER_UID}"; gid="${GAMESERVER_GID}"; \
+    if occ="$(getent passwd "${uid}")"; then \
+      echo "removing pre-existing user ${occ%%:*} (uid ${uid})"; \
+      userdel -r "${occ%%:*}" 2>/dev/null || true; \
+    fi; \
+    if grp="$(getent group "${gid}")"; then \
+      echo "removing pre-existing group ${grp%%:*} (gid ${gid})"; \
+      groupdel "${grp%%:*}" 2>/dev/null || true; \
+    fi; \
+    groupadd -g "${gid}" gameserver; \
+    useradd -M -l -u "${uid}" -g "${gid}" -s /bin/bash gameserver; \
+    mkdir -p /tmp/.X11-unix; chmod 1777 /tmp/.X11-unix; \
+    mkdir -p /home/gameserver /server \
+             /home/gameserver/.steam/sdk64 /home/gameserver/.steam/sdk32; \
+    chown -R gameserver:gameserver /home/gameserver /server; \
+    if [ -d /usr/lib/steam ]; then chown -R gameserver:gameserver /usr/lib/steam; fi
+
+ENV HOME=/home/gameserver \
+    LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8 \
+    WINEPREFIX=/home/gameserver/.wine \
+    WINEARCH=win64 \
+    WINEDEBUG=-all \
+    WINEDLLOVERRIDES="mscoree,mshtml=" \
+    DISPLAY=:99
+
+USER gameserver
+WORKDIR /server
+
+# ---- Pre-initialize the Wine prefix -------------------------------------------
+RUN xvfb-run -a wineboot --init \
+ && wineserver -w \
+ && wine reg add "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides" /v mscoree /t REG_SZ /d "" /f \
+ && wine reg add "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides" /v mshtml  /t REG_SZ /d "" /f \
+ && wineserver -w \
+ && rm -rf /tmp/wine-* /tmp/wine.* /tmp/.X99-lock /tmp/.X11-unix/X99
+
+VOLUME ["/server"]
+
+COPY --chown=gameserver:gameserver entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
+CMD ["bash"]

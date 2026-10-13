@@ -1,0 +1,60 @@
+# Servy — example deployment.
+# The panel image ships every Minecraft Java runtime (8/11/17/21 + default)
+# and SteamCMD (amd64). It does NOT need the Docker CLI: the panel talks to
+# the Docker Engine API directly over the mounted socket.
+#
+# Mount /var/run/docker.sock so servy can spawn sibling containers:
+#   * SteamCMD install/update jobs (official steamcmd/steamcmd image)
+#   * Windows-only game servers via the servy-wine image from ghcr.io
+# The data dir must live on a host path docker can bind-mount back into
+# sibling containers (SERVY_HOST_DATA_PATH tells the panel where that is).
+#
+#   docker compose up -d
+#   → panel: http://localhost:8443  (plain HTTP; setup wizard on first boot)
+
+services:
+  servy:
+    image: ghcr.io/flameinthedark/servy:latest
+    container_name: servy
+    restart: unless-stopped
+    ports:
+      - "8443:8443"          # web UI + REST API + websocket
+      - "50051:50051"        # cluster gRPC (agents connect here)
+      - "25500-25600:25500-25600"   # Minecraft / game server port range
+      - "25500-25600:25500-25600/udp"
+      #- "2456-2457:2456-2457/udp"   # Valheim (game port + query port)
+      #- "7777:7777/udp"              # Abiotic Factor (game port)
+      #- "8211:8211/udp"            # Palworld
+      #- "27015:27015"              # CS2, TF2, GMod, etc. (TCP)
+      #- "27015:27015/udp"          # CS2, TF2, GMod, etc. (UDP)
+      #- "27016:27016/udp"          # SourceTV / query ports
+      # expose more ranges as needed, e.g. Steam:
+      #- "27000-27100:27000-27100"
+      #- "27000-27100:27000-27100/udp"
+    volumes:
+      # Host bind mount (REQUIRED for Docker backend / SteamCMD)
+      # Allows sibling containers to bind-mount server directories
+      - ./data:/data
+      # Docker socket for container management
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      TZ: Etc/UTC
+      # SERVY_UPDATE_CHECK_URL: disabled   # turn off update probes
+      # Host data path for container-to-host path translation (SteamCMD/Docker
+      # backend). Sibling containers bind-mount SERVER DIRS from the host, so
+      # this MUST point at the real host path of ./data.
+      SERVY_HOST_DATA_PATH: ${PWD:-.}/data
+
+  # Self-made Wine + SteamCMD base image used for Windows-only game servers
+  # (Abiotic Factor, V Rising, Enshrouded, ...). Not started as a service —
+  # build it with:  docker compose build servy-wine   (or: make docker-wine)
+  # The panel picks it up as ghcr.io/flameinthedark/servy-wine:latest from the
+  # game catalog; tag it locally if you prefer:
+  #   docker tag servy-wine:latest ghcr.io/flameinthedark/servy-wine:latest
+  servy-wine:
+    image: ghcr.io/flameinthedark/servy-wine:latest
+    build:
+      context: ./docker/steamcmd-wine
+    profiles: ["wine"]
+    entrypoint: ["true"]
+    restart: "no"

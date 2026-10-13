@@ -1,0 +1,18 @@
+bin/
+frontend/node_modules/
+frontend/dist/
+# release staging dir (make release) — NOT the embedded UI (see note below)
+/dist/
+# NOTE: internal/spa/dist is intentionally CHECKED IN (full frontend build).
+# It is the go:embed source for the single-binary UI — `go build` from a
+# fresh clone must produce a panel that actually serves its assets.
+# Rebuild + commit with `make frontend` when the UI changes.
+*.sqlite*
+/data/
+/logs/
+/servers/
+/backups/
+/import/
+/steamcmd/
+/config/
+default-creds.txt

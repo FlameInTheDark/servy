@@ -1,0 +1,25 @@
+app_id: 376030
+slug: "ark-se"
+name: "ARK: Survival Evolved"
+# ARK game traffic and the Steam A2S query are UDP. The query port follows
+# the {QUERY_PORT} placeholder (game port + 1 unless the catalog overrides),
+# so both published ports stay in sync with whatever port the user picked.
+run_command: './ShooterGameServer TheIsland?listen?SessionName={SERVER_NAME}?Port={PORT}?QueryPort={QUERY_PORT} -server -log'
+executable: "ShooterGameServer"
+stop_command: "quit"
+port: 7777
+port_name: "game"
+expose:
+  # no explicit port: follows the server's configured game port (remappable)
+  - proto: udp
+  - offset: 1
+    proto: udp
+    optional: true
+save_dirs:
+  - "ShooterGame/SavedArks"
+  - "ShooterGame/Saved/SavedArks"
+backup_dirs:
+  - "ShooterGame/SavedArks"
+  - "ShooterGame/Saved/SavedArks"
+  - "ShooterGame/Saved/Config"
+  - "ShooterGame/Saved/Logs"

@@ -1,0 +1,23 @@
+app_id: 1829350
+slug: "v-rising"
+name: "V Rising"
+# The V Rising dedicated server ships Windows binaries only (VRisingServer.exe);
+# on Linux it runs through Wine in the servy-wine container.
+run_command: './VRisingServer.exe -persistentDataPath {SAVE_DIR} -serverName "{SERVER_NAME}" -gamePort {PORT} -queryPort {QUERY_PORT}'
+executable: "VRisingServer.exe"
+stop_command: "shutdown"
+port: 9876
+port_name: "game"
+platform: "windows"
+windows_only: true
+docker_image: "ghcr.io/flameinthedark/servy-wine:latest"
+notes: "Windows-only dedicated server (Wine). Game and Steam query ports are UDP; query port defaults to game port + 1."
+expose:
+  - proto: udp
+  - offset: 1
+    proto: udp
+save_dirs:
+  - "saves"
+backup_dirs:
+  - "saves"
+  - "Settings"

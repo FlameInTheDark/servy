@@ -1,0 +1,25 @@
+app_id: 2278520
+slug: "enshrouded"
+name: "Enshrouded"
+# The Enshrouded dedicated server ships Windows binaries only; on Linux it
+# runs through Wine in the servy-wine container.
+run_command: './enshrouded/x64/enshrouded_server.exe'
+executable: "enshrouded/x64/enshrouded_server.exe"
+stop_command: "quit"
+port: 15636
+port_name: "game"
+platform: "windows"
+windows_only: true
+docker_image: "ghcr.io/flameinthedark/servy-wine:latest"
+notes: "Windows-only dedicated server (Wine). Game + query ports are UDP (15636/15637). Configure name/password in enshrouded/server.json after first start."
+expose:
+  - proto: udp
+  - offset: 1
+    proto: udp
+save_dirs:
+  - "enshrouded/savegame"
+backup_dirs:
+  - "enshrouded/savegame"
+  - "enshrouded/server.json"
+config_files:
+  - "enshrouded/server.json"

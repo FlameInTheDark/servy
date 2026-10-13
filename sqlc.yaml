@@ -1,0 +1,14 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    queries: "queries"
+    schema: "internal/database/migrations"
+    gen:
+      go:
+        package: "gen"
+        out: "internal/repo/gen"
+        emit_pointers_for_null_types: true
+        emit_empty_slices: true
+        overrides:
+          - column: "server_stats.players"
+            go_type: "string"

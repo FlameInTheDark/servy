@@ -1,0 +1,27 @@
+app_id: 730
+slug: "cs2"
+name: "Counter-Strike 2"
+run_command: './cs2 -dedicated +map de_dust2 +port {PORT}'
+executable: "cs2"
+stop_command: "quit"
+port: 27015
+port_name: "game"
+save_dirs:
+  - "csgo/maps"
+  - "csgo/cfg"
+  - "csgo/addons"
+# CS2 speaks UDP (game + A2S) and TCP (game) on the same port; the Steam
+# query port follows the source convention of game_port + 1.
+expose:
+  # no explicit port: follows the server's configured game port (remappable);
+  # CS2 listens on TCP and UDP on the same port
+  - proto: tcp
+  - proto: udp
+  - offset: 1
+    proto: udp
+    optional: true
+backup_dirs:
+  - "csgo/maps"
+  - "csgo/cfg"
+  - "csgo/addons"
+  - "csgo/server.cfg"

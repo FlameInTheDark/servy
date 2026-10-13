@@ -1,0 +1,29 @@
+app_id: 896660
+slug: "valheim"
+name: "Valheim"
+run_command: './valheim_server.x86_64 -name "{SERVER_NAME}" -port {PORT} -world "Dedicated" -password "secret" -public 1 -savedir {SAVE_DIR}'
+executable: "valheim_server.x86_64"
+stop_command: "stop"
+port: 2456
+port_name: "game"
+env:
+  LD_LIBRARY_PATH: ["./linux64", "mode:append"]
+config_files:
+  - "adminlist.txt"
+  - "permittedlist.txt"
+  - "bannedlist.txt"
+# Valheim is UDP-only: game port + the Steam query port on game_port+1.
+expose:
+  # no explicit port: follows the server's configured game port (remappable)
+  - proto: udp
+  - offset: 1
+    proto: udp
+save_dirs:
+  - "saves"
+  - "saves/worlds"
+backup_dirs:
+  - "saves"
+  - "adminlist.txt"
+  - "permittedlist.txt"
+  - "bannedlist.txt"
+  - "server.cfg"

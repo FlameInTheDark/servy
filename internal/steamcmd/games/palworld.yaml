@@ -1,0 +1,23 @@
+app_id: 2394010
+slug: "palworld"
+name: "Palworld"
+run_command: './PalServer.sh -port={PORT} -players=32 -publiclobby -savedir {SAVE_DIR}'
+executable: "PalServer.sh"
+stop_command: "quit"
+port: 8211
+port_name: "game"
+config_files:
+  - "DefaultPalWorldSettings.ini"
+save_dirs:
+  - "Pal/Saved/SaveGames"
+# Palworld is a Steam query (A2S) game on UDP, query port = game port + 1.
+expose:
+  # no explicit port: follows the server's configured game port (remappable)
+  - proto: udp
+  - offset: 1
+    proto: udp
+    optional: true
+backup_dirs:
+  - "Pal/Saved/SaveGames"
+  - "Pal/Saved/SavedConfig"
+  - "DefaultPalWorldSettings.ini"

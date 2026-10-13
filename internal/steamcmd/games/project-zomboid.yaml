@@ -1,0 +1,31 @@
+app_id: 380870
+slug: "project-zomboid"
+name: "Project Zomboid"
+# Linux depot ships start-server64.sh (StartServer64.bat is the Windows file)
+run_command: './start-server64.sh -servername server'
+executable: "start-server64.sh"
+stop_command: "quit"
+port: 16261
+port_name: "game"
+notes: "Game port is UDP. One extra UDP port per client slot opens above the game port (16262+). Edit Server/servertest.ini to change ports — the published ports must match it."
+config_files:
+  - "Server/servertest.ini"
+expose:
+  - port: 16261
+    proto: udp
+  - port: 16262
+    proto: udp
+    optional: true
+  - port: 16263
+    proto: udp
+    optional: true
+  - port: 16264
+    proto: udp
+    optional: true
+save_dirs:
+  - "Saves"
+  - "Server"
+backup_dirs:
+  - "Saves"
+  - "Server"
+  - "Server/servertest.ini"
