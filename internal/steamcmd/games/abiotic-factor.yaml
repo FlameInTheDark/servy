@@ -1,7 +1,7 @@
 app_id: 2857200
 slug: "abiotic-factor"
 name: "Abiotic Factor"
-run_command: './AbioticFactor/Binaries/Win64/AbioticFactorServer-Win64-Shipping.exe -log -newconsole -useperfthreads -MaxServerPlayers=6 -PORT={PORT} -QueryPort={QUERY_PORT} -SteamServerName="{SERVER_NAME}"'
+run_command: './AbioticFactor/Binaries/Win64/AbioticFactorServer-Win64-Shipping.exe'
 executable: "AbioticFactor/Binaries/Win64/AbioticFactorServer-Win64-Shipping.exe"
 stop_command: "quit"
 port: 7777
@@ -14,6 +14,64 @@ windows_only: true
 # no Wine and cannot run the Windows server binary.
 docker_image: "ghcr.io/flameinthedark/servy-wine:latest"
 notes: "Windows-only dedicated server. Runs in the servy-wine container; SteamCMD fetches the Windows depot. Both ports are UDP. Recommended: 6 players."
+launch_options:
+  - key: log
+    label: Log output
+    description: Enable Unreal log output.
+    type: boolean
+    flag: -log
+    default: "true"
+  - key: new_console
+    label: New console
+    description: Enable Unreal's new console.
+    type: boolean
+    flag: -newconsole
+    default: "true"
+  - key: use_perf_threads
+    label: Use performance threads
+    description: Enable Unreal performance worker threads.
+    type: boolean
+    flag: -useperfthreads
+    default: "true"
+  - key: max_server_players
+    label: Maximum players
+    description: Maximum simultaneous players; the recommended setting is 6.
+    type: number
+    flag: -MaxServerPlayers
+    flag_separator: "="
+    default: "6"
+    min: 1
+  - key: port
+    label: Game port
+    description: UDP game port selected in the creation form.
+    type: number
+    source: port
+    flag: -PORT
+    flag_separator: "="
+    min: 1
+    max: 65535
+  - key: query_port
+    label: Query port
+    description: UDP Steam query port, defaulting to the manifest query port.
+    type: number
+    source: query_port
+    flag: -QueryPort
+    flag_separator: "="
+    min: 1
+    max: 65535
+  - key: server_password
+    label: Server password
+    description: Leave blank to run without a server password.
+    type: password
+    flag: -ServerPassword
+    flag_separator: "="
+  - key: server_name
+    label: Server name
+    description: Name shown to players; uses the server name from the creation form.
+    type: text
+    source: server_name
+    flag: -SteamServerName
+    flag_separator: "="
 expose:
   # no explicit port: follows the server's configured game port (remappable)
   - proto: udp

@@ -5,7 +5,7 @@ import {
   Upload, Download, Terminal, Gamepad2, Boxes, ArrowLeft, ArrowRight, Loader2, FileArchive, Container, Cpu, AlertTriangle, Monitor, X,
 } from "lucide-react";
 import { useApi } from "@/hooks/useApi";
-import { api, GET, SteamGame, JavaInstall, realtime } from "@/api/client";
+import { api, GET, SteamGame, SteamLaunchOption, JavaInstall, realtime } from "@/api/client";
 
 interface ShellInfo { id: string; label: string; path?: string; available: boolean; platform: string }
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, Button, Input, Label, Badge, Skeleton, Switch, Textarea } from "@/components/ui/primitives";
@@ -19,6 +19,16 @@ const CREATE_TYPES = [
   { id: "raw_exec", label: "Custom / Raw", desc: "Existing directory + execution command", icon: Terminal },
 ];
 
+function defaultSteamOptions(game?: SteamGame): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const option of game?.launch_options || []) {
+    if (option.source) continue;
+    if (option.default !== undefined) values[option.key] = option.default;
+    else if (option.type === "boolean") values[option.key] = "false";
+  }
+  return values;
+}
+
 export default function CreateServerPage() {
   const nav = useNavigate();
   const [step, setStep] = useState(1);
@@ -29,7 +39,8 @@ export default function CreateServerPage() {
     execution_backend: "process", java_selection: "", docker_image: "", docker_ports: "", docker_env: "",
   });
   const [busy, setBusy] = useState(false);
-  const { data: steamGames, loading: steamLoading } = useApi<SteamGame[]>("/panel/SteamCatalog");
+  const [steamSearch, setSteamSearch] = useState("");
+  const { data: steamGames, loading: steamLoading } = useApi<SteamGame[]>("/panel/steam/catalog");
   const { data: jarCache } = useApi<any>("/panel/JarCache");
   const { data: javaData } = useApi<{ installs: JavaInstall[] }>("/panel/java");
   const { data: dockerData } = useApi<{ available: boolean }>("/panel/docker");
@@ -43,42 +54,41 @@ export default function CreateServerPage() {
   // SteamCMD live output
   const [steamOutput, setSteamOutput] = useState<string[]>([]);
   const [steamInstalling, setSteamInstalling] = useState(false);
-  const [createdServerId, setCreatedServerId] = useState<string | null>(null);
   const rtRef = useRef<ReturnType<typeof realtime> | null>(null);
+  const progressUnsubscribeRef = useRef<(() => void) | null>(null);
 
   const set = (k: string, v: any) => setForm((f: any) => ({ ...f, [k]: v }));
+  const setSteamOption = (key: string, value: string) => set("steam_options", {
+    ...(form.steam_options || {}), [key]: value,
+  });
 
   const submit = async () => {
     setBusy(true);
     let unsubscribe: (() => void) | null = null;
-    
-    // For Steam games, set up live output subscription BEFORE the API call
-    if (createType === "steam_game") {
+    const isSteamInstall = createType === "steam_game";
+
+    if (isSteamInstall) {
       setSteamInstalling(true);
       setSteamOutput([]);
-      
       const rt = realtime();
       rtRef.current = rt;
-      
-      // Wait for WebSocket connection to be ready
-      await rt.waitForConnection();
-      
-      // Subscribe to all server events (wildcard) to catch steamcmd_output
-      // The backend publishes to both "server.<id>" and "*" topics
       unsubscribe = rt.on((msg) => {
         if (msg.event === "steamcmd_output" && msg.data?.line) {
           setSteamOutput((prev) => [...prev.slice(-499), msg.data.line]);
-        } else if (msg.event === "send_start_reload" && msg.data?.server_id) {
-          // Server creation complete - use server_id from event directly
-          const serverId = msg.data.server_id;
-          setCreatedServerId(serverId);
-          setSteamInstalling(false);
-          setTimeout(() => nav(`/servers/${serverId}`), 500);
         }
       });
-      rt.subscribe("*"); // listen to all server events
+      progressUnsubscribeRef.current = unsubscribe;
+
+      // The panel may be temporarily offline; don't block creation forever if
+      // the WebSocket handshake never completes. The topic is retained for the
+      // next reconnect, while the HTTP request remains the source of truth.
+      await Promise.race([
+        rt.waitForConnection().catch(() => undefined),
+        new Promise<void>((resolve) => window.setTimeout(resolve, 2500)),
+      ]);
+      rt.subscribe("creation");
     }
-    
+
     try {
       const payload: any = { ...form };
       if (isDocker) {
@@ -91,55 +101,33 @@ export default function CreateServerPage() {
       } else {
         delete payload.docker_image; delete payload.docker_ports; delete payload.docker_env;
       }
-      
+
       const res = await api<any>("POST", "/servers", payload);
-      setCreatedServerId(res.server_id);
       toast.success(`Server "${res.name}" created`);
-      
-      // For Steam games, if we already have the server_id from response, 
-      // also try to navigate (fallback if event didn't fire)
-      if (createType === "steam_game") {
-        // Check if we already got the event, otherwise wait a bit
-        setTimeout(() => {
-          if (createdServerId === res.server_id) {
-            nav(`/servers/${res.server_id}`);
-          }
-        }, 2000);
-      } else {
-        nav(`/servers/${res.server_id}`);
-      }
-      
-      // If Steam game, show live output from the response
-      if (createType === "steam_game" && res.steam_output) {
-        setSteamOutput(res.steam_output);
-      }
-      
-      // Cleanup after navigation
-      if (unsubscribe) {
-        setTimeout(() => unsubscribe(), 10000);
-      }
+      if (res.steam_output) setSteamOutput(res.steam_output);
+      setSteamInstalling(false);
+      nav(`/servers/${res.server_id}`);
     } catch (e: any) {
       toast.error(e.message);
-      // Keep steam output visible on failure so user can diagnose
-      // Also add the error to the output panel
-      if (e.message && steamOutput.length > 0) {
-        setSteamOutput((prev) => [...prev, `ERROR: ${e.message}`]);
-      }
+      if (e.message) setSteamOutput((prev) => [...prev, `ERROR: ${e.message}`]);
       setSteamInstalling(false);
     } finally {
-      if (createType !== "steam_game") {
-        setBusy(false);
+      if (unsubscribe) {
+        unsubscribe();
+        progressUnsubscribeRef.current = null;
       }
+      if (isSteamInstall) rtRef.current?.unsubscribe("creation");
+      setBusy(false);
     }
   };
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (rtRef.current) {
-        rtRef.current.close();
-        rtRef.current = null;
-      }
+      progressUnsubscribeRef.current?.();
+      progressUnsubscribeRef.current = null;
+      rtRef.current?.unsubscribe("creation");
+      rtRef.current = null;
     };
   }, []);
 
@@ -188,8 +176,67 @@ export default function CreateServerPage() {
   };
 
   const pickedSteam = pickedSteamGame;
+  const filteredSteamGames = (steamGames || []).filter((game) => {
+    const q = steamSearch.trim().toLowerCase();
+    return !q || game.name.toLowerCase().includes(q) || game.slug.toLowerCase().includes(q) || String(game.app_id).includes(q);
+  });
   const jarEntries: { name: string; version: string; url: string }[] =
     jarCache?.categories?.flatMap((c: any) => c.servers || []) || [];
+  let step2Error = "";
+  if (!form.name?.trim()) step2Error = "Enter a name for this server.";
+  else if (!Number.isInteger(form.port) || form.port < 1 || form.port > 65535) step2Error = "Enter a port between 1 and 65535.";
+  else if (createType === "import_zip" && !form.archive_path) step2Error = "Upload a ZIP archive or enter its path on the host.";
+  else if (createType === "download_jar" && !form.jar_url) step2Error = "Choose a server JAR or enter its download URL.";
+  else if (createType === "steam_game" && !form.steam_slug) step2Error = "Choose a SteamCMD game.";
+  else if (createType === "raw_exec" && (!form.executable || !form.execution_command)) step2Error = "Provide an executable and its start command.";
+  else if (windowsOnlySteam && !dockerData?.available) step2Error = "This game requires Docker, but no Docker daemon is available to Servy.";
+  if (!step2Error && createType === "steam_game" && pickedSteam && !pickedSteam.query_port && Number(form.port) >= 65535) {
+    step2Error = "This game's query port would be outside 1–65535; choose a lower game port or set an explicit query_port in its manifest.";
+  }
+  if (!step2Error && createType === "steam_game" && pickedSteam) {
+    for (const option of pickedSteam.launch_options || []) {
+      let value = option.source === "server_name" ? String(form.name || "").trim()
+        : option.source === "port" ? String(form.port ?? "")
+          : option.source === "query_port" ? String(pickedSteam.query_port || Number(form.port) + 1)
+            : option.source === "save_dir" ? "server save directory"
+              : (form.steam_options || {})[option.key] ?? option.default ?? (option.type === "boolean" ? "false" : "");
+      if (option.required && !value.trim()) {
+        step2Error = `${option.label} is required.`;
+        break;
+      }
+      if (!value && !option.required) continue;
+      if ((option.type === "text" || option.type === "password") && option.source !== "port" && option.source !== "query_port" && option.source !== "save_dir") {
+        const length = [...value].length;
+        if (option.min_length !== undefined && length < option.min_length) {
+          step2Error = `${option.label} must be at least ${option.min_length} characters.`;
+          break;
+        }
+        if (option.max_length !== undefined && length > option.max_length) {
+          step2Error = `${option.label} must be no longer than ${option.max_length} characters.`;
+          break;
+        }
+      }
+      if (option.type === "number") {
+        const number = Number(value);
+        if (!Number.isInteger(number)) {
+          step2Error = `${option.label} must be a whole number.`;
+          break;
+        }
+        if (option.min !== undefined && number < option.min) {
+          step2Error = `${option.label} must be at least ${option.min}.`;
+          break;
+        }
+        if (option.max !== undefined && number > option.max) {
+          step2Error = `${option.label} must be no greater than ${option.max}.`;
+          break;
+        }
+      }
+      if (option.type === "select" && !(option.options || []).some((choice) => choice.value === value)) {
+        step2Error = `Choose a valid value for ${option.label}.`;
+        break;
+      }
+    }
+  }
 
   return (
     <div className="p-6 max-w-3xl mx-auto">
@@ -311,13 +358,18 @@ export default function CreateServerPage() {
                 {steamLoading ? (
                   <Skeleton className="h-40" />
                 ) : (
-                  <div className="grid max-h-96 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
-                    {(steamGames || []).map((g) => (
+                  <div className="space-y-2">
+                    <Input value={steamSearch} onChange={(e) => setSteamSearch(e.target.value)} placeholder="Search games by name, slug, or Steam App ID" aria-label="Search SteamCMD games" />
+                    <div className="grid max-h-80 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
+                    {filteredSteamGames.length === 0 ? (
+                      <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground sm:col-span-2">No games match that search. Ask an administrator to add a game manifest in Game manifests.</div>
+                    ) : filteredSteamGames.map((g) => (
                       <button key={g.slug}
                         onClick={() => {
                           set("steam_slug", g.slug);
                           set("name", form.name || g.name);
                           set("port", g.port);
+                          set("steam_options", defaultSteamOptions(g));
                           set("type", "steam_cmd");
                           // Windows-only titles ship a Wine image in the catalog:
                           // preselect it so the field is never blank.
@@ -333,6 +385,7 @@ export default function CreateServerPage() {
                         <div className="flex items-center justify-between">
                           <span className="font-medium">{g.name}</span>
                           <span className="flex gap-1">
+                            {g.custom && <Badge variant="muted" className="text-[10px]">custom</Badge>}
                             {g.windows_only && <Badge variant="destructive" className="text-[10px]">windows</Badge>}
                             <Badge variant="secondary">#{g.app_id}</Badge>
                           </span>
@@ -340,11 +393,64 @@ export default function CreateServerPage() {
                         <div className="mt-1 text-xs text-muted-foreground">port {g.port}</div>
                       </button>
                     ))}
+                    </div>
                   </div>
                 )}
                 {pickedSteam && (
                   <div className="rounded-lg border bg-muted/40 p-3 text-xs">
+                    <div className="mb-1 text-muted-foreground">Command template</div>
                     <div className="font-mono">{pickedSteam.run_command}</div>
+                  </div>
+                )}
+                {!!pickedSteam?.launch_options?.length && (
+                  <div className="space-y-3 rounded-lg border p-4">
+                    <div>
+                      <div className="text-sm font-medium">Server launch parameters</div>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        These typed values are passed as command arguments, not shell text. Parameters marked as automatic use the server name or port above.
+                      </p>
+                    </div>
+                    {pickedSteam.launch_options.map((option: SteamLaunchOption) => {
+                      if (option.source) {
+                        return (
+                          <div key={option.key} className="rounded-md bg-muted/40 px-3 py-2">
+                            <div className="text-sm font-medium">{option.label} <span className="text-xs font-normal text-muted-foreground">(automatic)</span></div>
+                            {option.description && <p className="mt-0.5 text-xs text-muted-foreground">{option.description}</p>}
+                          </div>
+                        );
+                      }
+                      const value = (form.steam_options || {})[option.key] ?? option.default ?? (option.type === "boolean" ? "false" : "");
+                      return (
+                        <div key={option.key} className="space-y-1.5">
+                          <Label>{option.label}{option.required && <span className="ml-1 text-destructive">*</span>}</Label>
+                          {option.type === "boolean" ? (
+                            <div className="flex min-h-9 items-center">
+                              <Switch checked={value === "true"} onCheckedChange={(checked) => setSteamOption(option.key, checked ? "true" : "false")} />
+                            </div>
+                          ) : option.type === "select" ? (
+                            <SimpleSelect
+                              value={value}
+                              onValueChange={(selected) => setSteamOption(option.key, selected)}
+                              placeholder={option.required ? "Choose an option…" : "Use manifest default"}
+                              options={(option.options || []).map((choice) => ({ value: choice.value, label: choice.label }))}
+                            />
+                          ) : (
+                            <Input
+                              type={option.type === "password" ? "password" : option.type === "number" ? "number" : "text"}
+                              value={value}
+                              min={option.min}
+                              max={option.max}
+                              minLength={option.min_length}
+                              maxLength={option.max_length}
+                              required={option.required}
+                              autoComplete={option.type === "password" ? "new-password" : undefined}
+                              onChange={(e) => setSteamOption(option.key, e.target.value)}
+                            />
+                          )}
+                          {option.description && <p className="text-xs text-muted-foreground">{option.description}</p>}
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -394,22 +500,28 @@ export default function CreateServerPage() {
                 </div>
               )}
               <div className="grid gap-4 sm:grid-cols-2">
-                <div className="space-y-1.5">
-                  <Label>Terminal</Label>
-                  <SimpleSelect
-                    value={form.shell || "auto"}
-                    onValueChange={(v) => set("shell", v === "auto" ? "" : v)}
-                    options={shells.map((sh) => ({
-                      value: sh.id,
-                      label: sh.available ? sh.label : `${sh.label} — unavailable`,
-                    }))}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    How the execution command is launched. {shellsData?.platform === "windows"
-                      ? "Windows default: cmd (batch files)."
-                      : "Linux default: bash."} Pick PowerShell / Git Bash when the start script needs it.
-                  </p>
-                </div>
+                {createType === "steam_game" ? (
+                  <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
+                    Steam game manifests run directly as an argument vector; typed values are never interpreted by a shell.
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    <Label>Terminal</Label>
+                    <SimpleSelect
+                      value={form.shell || "auto"}
+                      onValueChange={(v) => set("shell", v === "auto" ? "" : v)}
+                      options={shells.map((sh) => ({
+                        value: sh.id,
+                        label: sh.available ? sh.label : `${sh.label} — unavailable`,
+                      }))}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      How the execution command is launched. {shellsData?.platform === "windows"
+                        ? "Windows default: cmd (batch files)."
+                        : "Linux default: bash."} Pick PowerShell / Git Bash when the start script needs it.
+                    </p>
+                  </div>
+                )}
                 <div className="space-y-1.5">
                   <Label>Backend</Label>
                   <SimpleSelect
@@ -480,6 +592,7 @@ export default function CreateServerPage() {
               </div>
               <Switch checked={form.crash_detection} onCheckedChange={(v) => set("crash_detection", v)} />
             </div>
+            {step2Error && <p role="alert" className="rounded-md border border-warning/40 bg-warning/10 p-3 text-sm text-warning">{step2Error}</p>}
           </CardContent>
         </Card>
       )}
@@ -526,13 +639,25 @@ export default function CreateServerPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-2 text-sm">
-            {Object.entries(form).filter(([k, v]) => v !== "" && v !== undefined && v !== null && v !== false)
+            {Object.entries(form).filter(([k, v]) => k !== "steam_options" && v !== "" && v !== undefined && v !== null && v !== false)
               .map(([k, v]) => (
                 <div key={k} className="flex justify-between gap-4 border-b py-1.5">
                   <span className="text-muted-foreground">{k.replace(/_/g, " ")}</span>
                   <span className="font-mono text-xs truncate max-w-[60%]">{String(v)}</span>
                 </div>
               ))}
+            {pickedSteam?.launch_options?.filter((option) => !option.source).map((option) => {
+              const value = (form.steam_options || {})[option.key] ?? option.default ?? "";
+              if (!value && !option.required) return null;
+              return (
+                <div key={option.key} className="flex justify-between gap-4 border-b py-1.5">
+                  <span className="text-muted-foreground">{option.label}</span>
+                  <span className="font-mono text-xs truncate max-w-[60%]">
+                    {option.type === "password" ? "•••••• (hidden)" : value}
+                  </span>
+                </div>
+              );
+            })}
           </CardContent>
         </Card>
       )}
@@ -542,12 +667,12 @@ export default function CreateServerPage() {
           <ArrowLeft /> Back
         </Button>
         {step < 3 ? (
-          <Button onClick={() => setStep(step + 1)} disabled={uploadPct !== null || (step === 1 ? false : !form.name)}>
+          <Button onClick={() => setStep(step + 1)} disabled={uploadPct !== null || busy || (step === 2 && !!step2Error)}>
             Continue <ArrowRight />
           </Button>
         ) : (
-          <Button onClick={submit} disabled={busy || uploadPct !== null || !form.name}>
-            {busy && <Loader2 className="animate-spin" />} Create Server
+          <Button onClick={submit} disabled={busy || uploadPct !== null || !!step2Error}>
+            {busy && <Loader2 className="animate-spin" />} {busy && createType === "steam_game" ? "Installing…" : busy ? "Creating…" : "Create Server"}
           </Button>
         )}
       </div>

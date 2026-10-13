@@ -10,11 +10,15 @@ import (
         "fmt"
         "io"
         "net/http"
+	"net/url"
         "os"
+	"path"
         "path/filepath"
         "sort"
+	"strconv"
         "strings"
         "time"
+	"unicode/utf8"
 
         "github.com/google/uuid"
 
@@ -58,6 +62,7 @@ type Request struct {
         // steam_game
         SteamSlug string `json:"steam_slug,omitempty"`
         AppID     string `json:"app_id,omitempty"`
+	SteamOptions map[string]string `json:"steam_options,omitempty"`
         // execution environment (process | docker)
         JavaSelection    string            `json:"java_selection,omitempty"`    // "", "java" or JVM path
         Shell            string            `json:"shell,omitempty"`             // "", auto, bash, sh, cmd, powershell, pwsh, git-bash, none
@@ -122,10 +127,43 @@ func (s *Service) Validate(r Request) error {
         if strings.TrimSpace(r.Name) == "" {
                 return errors.New("server name required")
         }
+	if utf8.RuneCountInString(strings.TrimSpace(r.Name)) > 120 {
+		return errors.New("server name must be no longer than 120 characters")
+	}
+	if strings.ContainsAny(r.Name, "\x00\r\n") {
+		return errors.New("server name must not contain control characters or line breaks")
+	}
         if r.CreateType == CreateSteamGame {
                 if r.SteamSlug == "" && r.AppID == "" {
                         return errors.New("steam_slug or app_id required")
                 }
+		game, err := s.resolveGame(r)
+		if err != nil {
+			return err
+		}
+		port := r.Port
+		if port == 0 {
+			port = game.Port
+		}
+		if port < 1 || port > 65535 {
+			return errors.New("game port must be between 1 and 65535")
+		}
+		queryPort := game.QueryPort
+		if queryPort == 0 {
+			queryPort = port + 1
+		}
+		if queryPort < 1 || queryPort > 65535 {
+			return errors.New("selected game port requires an explicit valid query_port in its game manifest")
+		}
+		_, _, err = steamcmd.ResolveLaunchOptions(game.LaunchOptions, r.SteamOptions, steamcmd.LaunchContext{
+			ServerName: strings.TrimSpace(r.Name), Port: port, QueryPort: queryPort,
+			SaveDir: filepath.Join(s.serversRoot, "preview", "saves"),
+		})
+		if err != nil {
+			return err
+		}
+	} else if len(r.SteamOptions) > 0 {
+		return errors.New("steam_options are only valid for SteamCMD game creation")
         }
         if r.CreateType == CreateImportZip && r.ArchivePath == "" {
                 return errors.New("archive_path required")
@@ -150,7 +188,7 @@ func (s *Service) Create(r Request, userID int64) (*Result, error) {
 
         serverType := r.ServerType
         def := gen.Server{
-                ServerID: serverID, ServerName: servers.SanitizeServerName(r.Name), Path: dir,
+		ServerID: serverID, ServerName: strings.TrimSpace(r.Name), Path: dir,
                 ServerIp: "127.0.0.1", ServerPort: int64(defaultPort(serverType, r.Port)),
                 Type: serverType, AutoStart: b2i(r.AutoStart), CrashDetection: b2i(r.CrashDetection),
                 AutoStartDelay: 10, ShutdownTimeout: 60, ShowStatus: 1, CountPlayers: 1,
@@ -237,9 +275,18 @@ func (s *Service) Create(r Request, userID int64) (*Result, error) {
                 def.Executable = jar
                 def.ExecutionCommand = buildCommand("minecraft-java", jar, r)
         case CreateDownload:
-                jarName := r.JarName
+		jarName := strings.TrimSpace(r.JarName)
                 if jarName == "" {
-                        jarName = filepath.Base(r.JarURL)
+			parsed, err := url.Parse(r.JarURL)
+			if err != nil {
+				os.RemoveAll(dir)
+				return nil, fmt.Errorf("invalid JAR URL: %w", err)
+			}
+			jarName = path.Base(parsed.Path)
+		}
+		if jarName == "" || jarName == "." || jarName == ".." || strings.ContainsAny(jarName, "/\\:\x00") {
+			os.RemoveAll(dir)
+			return nil, errors.New("jar_name must be a file name without a path or drive prefix")
                 }
                 dest := filepath.Join(dir, jarName)
                 if _, err := files.DownloadURL(r.JarURL, dest); err != nil {
@@ -265,6 +312,30 @@ func (s *Service) Create(r Request, userID int64) (*Result, error) {
                         os.RemoveAll(dir)
                         return nil, err
                 }
+		port := r.Port
+		if port == 0 {
+			port = game.Port
+		}
+		if port < 1 || port > 65535 {
+			os.RemoveAll(dir)
+			return nil, errors.New("game port must be between 1 and 65535")
+		}
+		queryPort := game.QueryPort
+		if queryPort == 0 {
+			queryPort = port + 1
+		}
+		if queryPort < 1 || queryPort > 65535 {
+			os.RemoveAll(dir)
+			return nil, errors.New("selected game port requires an explicit valid query_port in its game manifest")
+		}
+		_, launchValues, err := steamcmd.ResolveLaunchOptions(game.LaunchOptions, r.SteamOptions, steamcmd.LaunchContext{
+			ServerName: strings.TrimSpace(r.Name), Port: port, QueryPort: queryPort,
+			SaveDir: filepath.Join(dir, "saves"),
+		})
+		if err != nil {
+			os.RemoveAll(dir)
+			return nil, err
+		}
                 s.log.Get("server").Info("installing steam app %d (%s) into %s", game.AppID, game.Name, dir)
                 out := []string{}
                 // Platform forces the SteamCMD depot (windows for Windows-only servers).
@@ -277,7 +348,7 @@ func (s *Service) Create(r Request, userID int64) (*Result, error) {
                         s.bus.Publish(events.Event{
                                 Type:     events.EvSteamCmdOutput,
                                 ServerID: serverID,
-                                Data:     map[string]string{"line": line},
+				Data:     map[string]interface{}{"line": line, "user_id": userID},
                         })
                 })
                 res.SteamOutput = out
@@ -286,25 +357,22 @@ func (s *Service) Create(r Request, userID int64) (*Result, error) {
                         return nil, fmt.Errorf("steamcmd failed: %v", err)
                 }
                 def.Type = "steam_cmd"
+		// Catalog run commands are argv templates, not shell scripts. Direct
+		// execution keeps user-supplied launch values out of shell syntax.
+		def.Shell = "none"
                 def.AppID = ptr(fmt.Sprint(game.AppID))
                 def.Executable = game.Executable
-                port := r.Port
-                if port == 0 {
-                        port = game.Port
-                }
                 def.ServerPort = int64(port)
-                // Query port: catalog override, else the Source convention (game port + 1).
-                queryPort := game.QueryPort
-                if queryPort == 0 {
-                        queryPort = port + 1
+		// Keep the template and launch values separate. The supervisor substitutes
+		// placeholders token-by-token and appends each option as an argv element.
+		def.ExecutionCommand = game.RunCommand
+		def.Definitions, err = steamcmd.EncodeGameSnapshot(steamcmd.GameSnapshot{
+			Game: game, LaunchOptions: launchValues,
+		})
+		if err != nil {
+			os.RemoveAll(dir)
+			return nil, fmt.Errorf("store game launch configuration: %w", err)
                 }
-                cmd := strings.ReplaceAll(game.RunCommand, "{SERVER_NAME}", r.Name)
-                cmd = strings.ReplaceAll(cmd, "{PORT}", fmt.Sprint(port))
-                cmd = strings.ReplaceAll(cmd, "{QUERY_PORT}", fmt.Sprint(queryPort))
-                // Use server's data directory for saves (persists in Docker volume)
-                saveDir := filepath.Join(dir, "saves")
-                cmd = strings.ReplaceAll(cmd, "{SAVE_DIR}", saveDir)
-                def.ExecutionCommand = cmd
                 def.StopCommand = orDefault(game.StopCommand, "quit")
                 def.StopAction = "command"
                 // env.json seed (e.g. LD_LIBRARY_PATH for valheim)
@@ -319,8 +387,14 @@ func (s *Service) Create(r Request, userID int64) (*Result, error) {
                                 }
                                 envSpec[k] = map[string]interface{}{"contents": vals, "mode": mode}
                         }
-                        if b, err := json.MarshalIndent(envSpec, "", "  "); err == nil {
-                                os.WriteFile(filepath.Join(dir, "env.json"), b, 0o644)
+                        b, err := json.MarshalIndent(envSpec, "", "  ")
+                        if err != nil {
+                                os.RemoveAll(dir)
+                                return nil, fmt.Errorf("encode game environment settings: %w", err)
+                        }
+                        if err := os.WriteFile(filepath.Join(dir, "env.json"), b, 0o644); err != nil {
+                                os.RemoveAll(dir)
+                                return nil, fmt.Errorf("write game environment settings: %w", err)
                         }
                 }
                 res.Type = "steam_cmd"
@@ -385,18 +459,25 @@ func (s *Service) Create(r Request, userID int64) (*Result, error) {
 }
 
 func (s *Service) resolveGame(r Request) (steamcmd.Game, error) {
+	if s.catalog == nil {
+		return steamcmd.Game{}, errors.New("SteamCMD game catalog is unavailable")
+	}
         if r.SteamSlug != "" {
                 if g, ok := s.catalog.BySlug(r.SteamSlug); ok {
                         return g, nil
                 }
         }
         if r.AppID != "" {
-                if g, ok := s.catalog.ByAppID(r.AppID); ok {
+		id, err := strconv.ParseInt(r.AppID, 10, 32)
+		if err != nil || id <= 0 {
+			return steamcmd.Game{}, errors.New("app_id must be a positive 32-bit Steam application ID")
+		}
+		if g, ok := s.catalog.ByAppID(strconv.FormatInt(id, 10)); ok {
                         return g, nil
                 }
-                // unknown app id: generic steam server
+		// unknown app id: generic Steam server
                 return steamcmd.Game{
-                        AppID: atoi(r.AppID), Name: r.Name, Slug: fmt.Sprintf("app-%s", r.AppID),
+			AppID: int(id), Name: r.Name, Slug: fmt.Sprintf("app-%s", strconv.FormatInt(id, 10)),
                         Type: "steam_cmd", RunCommand: "./run.sh", Executable: "run.sh",
                         StopCommand: "quit", Port: 27015, PortName: "game",
                 }, nil
@@ -408,9 +489,12 @@ func (s *Service) resolveGame(r Request) (steamcmd.Game, error) {
 // archivePath may be absolute anywhere on the host (the wizard explicitly
 // offers "absolute archive path on the host") or relative to the import dir.
 func (s *Service) extractArchive(archivePath, dest string) error {
+	const maxEntries = 100_000
+	const maxExpandedBytes int64 = 8 << 30
+
         src := archivePath
         if !filepath.IsAbs(src) {
-                // relative → inside import dir
+		// Relative paths resolve inside the import directory.
                 src = filepath.Join(s.importDir, src)
         }
         if _, err := os.Stat(src); err != nil {
@@ -421,67 +505,118 @@ func (s *Service) extractArchive(archivePath, dest string) error {
                 return fmt.Errorf("cannot open archive: %v", err)
         }
         defer zr.Close()
-        // traversal validation + root detection
+	if len(zr.File) > maxEntries {
+		return fmt.Errorf("archive contains more than %d entries", maxEntries)
+	}
+
+	type archiveEntry struct {
+		file *zip.File
+		name string // normalized, server-relative slash path
+	}
+	entries := make([]archiveEntry, 0, len(zr.File))
         rootSet := map[string]bool{}
+	var declaredBytes uint64
         for _, f := range zr.File {
-                name := filepath.Clean(f.Name)
-                if strings.Contains(name, "..") {
+		name := path.Clean(strings.ReplaceAll(f.Name, `\`, "/"))
+		drivePath := len(name) >= 2 && ((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z')) && name[1] == ':'
+		if strings.ContainsRune(name, '\x00') || path.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") || drivePath {
                         s.log.Get("server").Error("TRAVERSAL DETECTED in import archive: %s", f.Name)
                         return files.ErrTraversal
                 }
-                parts := strings.SplitN(filepath.ToSlash(f.Name), "/", 2)
-                if len(parts) > 0 && parts[0] != "" {
-                        rootSet[parts[0]] = true
+		mode := f.Mode()
+		if !mode.IsRegular() && !mode.IsDir() {
+			return fmt.Errorf("archive entry %q is not a regular file or directory", f.Name)
+		}
+		if f.UncompressedSize64 > uint64(maxExpandedBytes)-declaredBytes {
+			return fmt.Errorf("archive expands beyond the %d GiB extraction limit", maxExpandedBytes>>30)
                 }
+		declaredBytes += f.UncompressedSize64
+		entries = append(entries, archiveEntry{file: f, name: name})
+		if name != "." {
+			rootSet[strings.SplitN(name, "/", 2)[0]] = true
         }
-        // Only unwrap when the single root is a DIRECTORY (some entry lives
-        // below it). A single top-level FILE (e.g. a zip containing just
-        // server.jar) must be extracted as-is — previously it was swallowed
-        // by the unwrap logic and the server ended up empty.
+	}
+
+	// Unwrap a single top-level directory, but keep a single top-level file
+	// (for example, a zip that contains only server.jar) at the server root.
         unwrap := false
+	root := ""
         if len(rootSet) == 1 {
-                var root string
-                for k := range rootSet {
-                        root = k
+		for entryRoot := range rootSet {
+			root = entryRoot
                 }
-                for _, f := range zr.File {
-                        if strings.HasPrefix(filepath.ToSlash(f.Name), root+"/") {
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.name, root+"/") {
                                 unwrap = true
                                 break
                         }
                 }
         }
-        for _, f := range zr.File {
-                name := filepath.Clean(f.Name)
+
+	destRoot, err := filepath.Abs(dest)
+	if err != nil {
+		return fmt.Errorf("resolve server directory: %w", err)
+	}
+	var extractedBytes int64
+	for _, entry := range entries {
+		name := entry.name
                 rel := name
                 if unwrap {
-                        rel = strings.TrimPrefix(strings.TrimPrefix(filepath.ToSlash(f.Name), strings.SplitN(filepath.ToSlash(f.Name), "/", 2)[0]), "/")
-                        rel = filepath.FromSlash(rel)
+			rel = strings.TrimPrefix(name, root+"/")
+			if name == root {
+				rel = ""
+			}
                 }
                 if rel == "" || rel == "." {
                         continue
                 }
-                target := filepath.Join(dest, rel)
-                if f.FileInfo().IsDir() {
-                        os.MkdirAll(target, 0o755)
+		target := filepath.Join(destRoot, filepath.FromSlash(rel))
+		targetRel, err := filepath.Rel(destRoot, target)
+		if err != nil || targetRel == ".." || strings.HasPrefix(targetRel, ".."+string(os.PathSeparator)) {
+			return files.ErrTraversal
+		}
+		if entry.file.Mode().IsDir() {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return fmt.Errorf("create archive directory %q: %w", rel, err)
+			}
                         continue
                 }
-                os.MkdirAll(filepath.Dir(target), 0o755)
-                rc, err := f.Open()
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return fmt.Errorf("create parent directory for %q: %w", rel, err)
+		}
+		rc, err := entry.file.Open()
                 if err != nil {
-                        continue
+			return fmt.Errorf("open archive entry %q: %w", rel, err)
                 }
                 out, err := os.Create(target)
                 if err != nil {
                         rc.Close()
-                        continue
+			return fmt.Errorf("create extracted file %q: %w", rel, err)
+		}
+		remaining := maxExpandedBytes - extractedBytes
+		written, copyErr := io.Copy(out, io.LimitReader(rc, remaining+1))
+		closeOutErr := out.Close()
+		closeInErr := rc.Close()
+		extractedBytes += written
+		if extractedBytes > maxExpandedBytes {
+			return fmt.Errorf("archive expands beyond the %d GiB extraction limit", maxExpandedBytes>>30)
+		}
+		if copyErr != nil {
+			return fmt.Errorf("extract archive entry %q: %w", rel, copyErr)
+		}
+		if closeOutErr != nil {
+			return fmt.Errorf("close extracted file %q: %w", rel, closeOutErr)
+		}
+		if closeInErr != nil {
+			return fmt.Errorf("close archive entry %q: %w", rel, closeInErr)
+		}
+		if uint64(written) != entry.file.UncompressedSize64 {
+			return fmt.Errorf("archive entry %q has an inconsistent uncompressed size", rel)
+		}
+		if entry.file.Mode()&0o100 != 0 { // preserve the executable bit from the zip
+			if err := os.Chmod(target, 0o755); err != nil {
+				return fmt.Errorf("mark extracted file %q executable: %w", rel, err)
                 }
-                io.Copy(out, rc)
-                out.Close()
-                rc.Close()
-                mode := f.Mode()
-                if mode&0o100 != 0 { // executable bit from zip
-                        os.Chmod(target, 0o755)
                 }
         }
         return nil
@@ -587,14 +722,4 @@ func orDefault(s, def string) string {
                 return s
         }
         return def
-}
-func atoi(s string) int {
-        v := 0
-        for _, c := range s {
-                if c < '0' || c > '9' {
-                        return v
-                }
-                v = v*10 + int(c-'0')
-        }
-        return v
 }

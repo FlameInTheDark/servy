@@ -5,6 +5,7 @@ package files
 
 import (
 	"archive/zip"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/FlameInTheDark/servy/internal/safehttp"
 )
 
 // ErrTraversal is returned (and audited) on any path escape attempt.
@@ -402,21 +405,42 @@ func (u *UploadStore) Assemble(id string, total int, finalPath string) error {
 }
 
 // DownloadURL downloads a remote URL into a guarded path (import helpers).
-func DownloadURL(url, destPath string) (int64, error) {
-	resp, err := http.Get(url)
+// User-supplied download URLs use the SSRF-resistant client and are size-limited.
+func DownloadURL(rawURL, destPath string) (int64, error) {
+	const maxDownloadSize = int64(2 << 30)
+	client := safehttp.NewClient(15 * time.Minute)
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, rawURL, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := client.Do(request)
 	if err != nil {
 		return 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("download %s: status %d", url, resp.StatusCode)
+		return 0, fmt.Errorf("download %s: status %d", rawURL, resp.StatusCode)
 	}
-	out, err := os.Create(destPath)
+	if resp.ContentLength > maxDownloadSize {
+		return 0, fmt.Errorf("download exceeds the 2 GiB size limit")
+	}
+	out, err := os.OpenFile(destPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
 	if err != nil {
 		return 0, err
 	}
-	defer out.Close()
-	return io.Copy(out, resp.Body)
+	written, copyErr := io.Copy(out, io.LimitReader(resp.Body, maxDownloadSize+1))
+	closeErr := out.Close()
+	if copyErr != nil || closeErr != nil || written > maxDownloadSize {
+		_ = os.Remove(destPath)
+		if copyErr != nil {
+			return written, copyErr
+		}
+		if closeErr != nil {
+			return written, closeErr
+		}
+		return written, fmt.Errorf("download exceeds the 2 GiB size limit")
+	}
+	return written, nil
 }
 
 // NewGuardOrPanic builds a guard panicking on error (call sites with known-good roots).

@@ -172,6 +172,12 @@ func (a *App) handleOpenAPI(c fiber.Ctx) error {
 			"/api/v1/panel/stats":            map[string]string{"get": "Host stats"},
 			"/api/v1/panel/nodes":            map[string]string{"get": "List cluster nodes", "post": "Add node"},
 			"/api/v1/panel/steam/catalog":    map[string]string{"get": "SteamCMD game catalog"},
+			"/api/v1/panel/steam/catalog/custom":          map[string]string{"get": "List custom SteamCMD manifests", "post": "Add or update a SteamCMD manifest"},
+			"/api/v1/panel/steam/catalog/custom/validate": map[string]string{"post": "Validate a SteamCMD manifest"},
+			"/api/v1/panel/steam/catalog/custom/{slug}":   map[string]string{"delete": "Remove a custom SteamCMD manifest"},
+			"/api/v1/panel/manifests":                     map[string]string{"get": "List server-creation manifests", "post": "Import a server-creation manifest"},
+			"/api/v1/panel/manifests/apply":               map[string]string{"post": "Create a server from a manifest"},
+			"/api/v1/panel/manifests/{definition_id}":     map[string]string{"get": "Get a server-creation manifest", "delete": "Delete a server-creation manifest"},
 			"/ws":                            map[string]string{"get": "WebSocket (subscribe/topics protocol)"},
 		},
 	}

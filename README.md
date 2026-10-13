@@ -59,7 +59,7 @@ Mount `/var/run/docker.sock` to let Servy spawn sibling containers for SteamCMD 
 - **Auth & RBAC** — Argon2id, JWT sessions, TOTP 2FA + recovery codes, API keys (hashed at rest), 8-bit permission masks, quantity limits
 - **Cluster & Agents** — Proxmox-style multi-node: register headless agents (`servy-agent`), manage remote servers from any panel, mTLS-ready
 - **Config Editors** — Visual editor for `server.properties` (grouped schema), JSON with live validation, YAML/properties/text raw mode
-- **Manifests** — URL-importable server definitions (`servy manifest add --url ...`) — marketplace-ready
+- **Manifests** — Separate SteamCMD game catalog entries from reusable server-creation recipes; see the [manifest workflows](docs/manifests.md)
 
 
 ---
@@ -71,7 +71,8 @@ servy serve [--data DIR]       # Run the panel (API + WS + UI + engine)
 servy setup [-u -p]            # Create the first admin user
 servy user add|list|passwd     # User management
 servy agent --panel HOST:PORT  # Run as headless cluster agent
-servy manifest list|add        # Manage server-definition manifests
+servy manifest list|add        # Manage server-creation recipe manifests
+servy game-manifest list|validate|add|remove  # Manage SteamCMD game definitions
 servy node hello --addr ADDR   # Test cluster connectivity
 servy migrate status           # Database migration status
 servy version                  # Build info (version, commit, date)

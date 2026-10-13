@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
   Server, Plus, Search, Play, Square, RotateCw, Users, Cpu, MemoryStick,
@@ -62,16 +62,17 @@ function fmtMem(bytes: number) {
 /* ------------------------------ server card ------------------------------- */
 
 function ServerCard({ s, onAction }: { s: ServerDef; onAction: (a: "start" | "stop" | "restart") => void }) {
-  const nav = useNavigate();
   const state = effectiveState(s);
   const busy = state === "starting" || state === "stopping" || state === "importing" || state === "updating";
   const uptime = uptimeOf(s);
 
   return (
-    <div
-      className="group cursor-pointer rounded-xl border bg-card p-4 transition-all hover:border-border hover:shadow-md"
-      onClick={() => nav(`/servers/${s.server_id}`)}
-    >
+    <div className="group rounded-xl border bg-card p-4 transition-all hover:border-border hover:shadow-md">
+      <Link
+        to={`/servers/${s.server_id}`}
+        aria-label={`Manage ${s.server_name}`}
+        className="block rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
       <div className="flex items-start justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2.5">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-muted">
@@ -110,6 +111,7 @@ function ServerCard({ s, onAction }: { s: ServerDef; onAction: (a: "start" | "st
           <div className="mt-0.5 font-medium tabular-nums">{uptime ?? "—"}</div>
         </div>
       </div>
+      </Link>
 
       <div className="mt-3 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
@@ -120,7 +122,7 @@ function ServerCard({ s, onAction }: { s: ServerDef; onAction: (a: "start" | "st
           )}
           {s.version && <span className="truncate">{s.version}</span>}
         </div>
-        <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100" onClick={(e) => e.stopPropagation()}>
+        <div className="flex gap-1">
           {busy ? (
             <Button variant="ghost" size="sm" disabled>
               <Loader2 className="animate-spin" /> {state}

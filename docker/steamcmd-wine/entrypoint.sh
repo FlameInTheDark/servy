@@ -75,19 +75,30 @@ trap shutdown TERM INT
 
 # ---- Wine prefix --------------------------------------------------------------
 # The image bakes a prefix at $HOME/.wine owned by the build-time uid (1000).
-# When the container runs as a DIFFERENT uid (servy starts sibling containers
-# with the panel's own uid:gid so the bind-mounted server dir stays writable)
-# that prefix is not writable — re-initialize a fresh one under /tmp (private
-# to this container, recreated on start).
+# Servy may override the container uid to match the owner of its bind-mounted
+# server directory. Wine requires the prefix itself to be owned by that uid;
+# checking only -w is insufficient because root can write another user's
+# prefix while Wine still refuses to use it.
 ensure_wine_prefix() {
-        if [[ -d "$WINEPREFIX" && -w "$WINEPREFIX" ]]; then
+        local uid fallback
+        uid="$(id -u)"
+        if [[ -d "$WINEPREFIX" && -w "$WINEPREFIX" && -O "$WINEPREFIX" ]]; then
                 return
         fi
-        log "wine prefix $WINEPREFIX missing or not writable for uid=$(id -u) — initializing /tmp/wine-prefix"
-        export WINEPREFIX="/tmp/wine-prefix"
+
+        fallback="${TMPDIR:-/tmp}/servy-wine-prefix-${uid}"
+        if [[ -e "$fallback" && ( ! -d "$fallback" || ! -w "$fallback" || ! -O "$fallback" ) ]]; then
+                # Never try to repair/chown a prefix owned by somebody else.
+                # Pick a fresh private path for this process uid instead.
+                fallback="$(mktemp -d "${TMPDIR:-/tmp}/servy-wine-prefix.${uid}.XXXXXX")" || die "cannot create a private Wine prefix under ${TMPDIR:-/tmp}"
+        else
+                mkdir -p "$fallback" || die "cannot create Wine prefix at $fallback"
+        fi
+
+        log "Wine prefix $WINEPREFIX is missing, not writable, or not owned by uid=${uid}; using $fallback"
+        export WINEPREFIX="$fallback"
         export HOME="${TMPDIR:-/tmp}"
         if [[ ! -f "$WINEPREFIX/system.reg" ]]; then
-                mkdir -p "$WINEPREFIX"
                 if command -v xvfb-run >/dev/null 2>&1; then
                         xvfb-run -a wineboot --init
                 else
@@ -230,6 +241,15 @@ is_windows_cmd() {
         esac
 }
 
+env_cmd_is_windows() {
+        local first_word base
+        first_word="${RUN_CMD%% *}"
+        # Strip common relative and absolute path prefixes for the suffix test.
+        base="${first_word#./}"
+        base="${base##*/}"
+        is_windows_cmd "$base"
+}
+
 run_windows() {
         ensure_wine_prefix
         log "executing via wine: $*"
@@ -238,12 +258,7 @@ run_windows() {
 
 # Environment mode: RUN_CMD (+ ADDITIONAL_ARGS) as a shell string.
 run_env_cmd() {
-        local first_word
-        first_word="${RUN_CMD%% *}"
-        # strip common relative-path prefixes for the suffix test
-        local base="${first_word#./}"
-        base="${base##*/}"
-        if is_windows_cmd "$base"; then
+        if env_cmd_is_windows; then
                 # shellcheck disable=SC2086
                 run_windows ${RUN_CMD} ${ADDITIONAL_ARGS}
         else
@@ -258,11 +273,13 @@ main() {
 
         # ---- Command mode ----
         if [[ $# -gt 0 ]]; then
-                setup_steam_client "$PWD"
                 if is_windows_cmd "$1"; then
+                        # Windows binaries use their own Steamworks DLLs, not the
+                        # Linux steamclient.so wiring used by native Linux servers.
                         ensure_wine_prefix
                         run_windows "$@" &
                 else
+                        setup_steam_client "$PWD"
                         "$@" &
                 fi
                 CHILD_PID=$!
@@ -291,7 +308,9 @@ main() {
         fi
 
         cd "${INSTALL_DIR}" || die "cannot cd into ${INSTALL_DIR}"
-        setup_steam_client "$INSTALL_DIR"
+        if ! env_cmd_is_windows; then
+                setup_steam_client "$INSTALL_DIR"
+        fi
         run_env_cmd &
         CHILD_PID=$!
         wait "$CHILD_PID"
@@ -305,4 +324,6 @@ main() {
         exit "$rc"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+        main "$@"
+fi

@@ -1,11 +1,20 @@
 app_id: 730
 slug: "cs2"
 name: "Counter-Strike 2"
-run_command: './cs2 -dedicated +map de_dust2 +port {PORT}'
+run_command: './cs2 -dedicated +port {PORT}'
 executable: "cs2"
 stop_command: "quit"
 port: 27015
 port_name: "game"
+launch_options:
+  - key: map
+    label: Startup map
+    description: Map loaded when the dedicated server starts.
+    type: text
+    flag: +map
+    default: de_dust2
+    min_length: 1
+    max_length: 128
 save_dirs:
   - "csgo/maps"
   - "csgo/cfg"

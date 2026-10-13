@@ -129,7 +129,14 @@ RUN xvfb-run -a wineboot --init \
 VOLUME ["/server"]
 
 COPY --chown=gameserver:gameserver entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Normalize shebang/line endings for build contexts checked out on Windows.
+RUN tmp="$(mktemp)" \
+ && sed 's/\r$//' /entrypoint.sh > "$tmp" \
+ && chmod u+w /entrypoint.sh \
+ && cat "$tmp" > /entrypoint.sh \
+ && rm -f "$tmp" \
+ && test "$(head -n 1 /entrypoint.sh)" = '#!/usr/bin/env bash' \
+ && chmod +x /entrypoint.sh
 
 # tini as PID 1: forwards signals to the entrypoint, reaps wine zombies.
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]

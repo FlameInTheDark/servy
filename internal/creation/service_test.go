@@ -10,6 +10,7 @@ import (
 
 	"github.com/FlameInTheDark/servy/internal/files"
 	"github.com/FlameInTheDark/servy/internal/logging"
+	"github.com/FlameInTheDark/servy/internal/steamcmd"
 )
 
 // newExtractService builds the minimal Service needed by extractArchive.
@@ -148,5 +149,32 @@ func TestExtractArchiveTraversal(t *testing.T) {
 	dest := t.TempDir()
 	if err := s.extractArchive(zipPath, dest); err != files.ErrTraversal {
 		t.Fatalf("err = %v, want ErrTraversal", err)
+	}
+}
+
+func TestValidateSteamCreationRequiresTypedLaunchValues(t *testing.T) {
+	catalog := steamcmd.NewCatalog(filepath.Join(t.TempDir(), "steamgames.json"))
+	service := &Service{catalog: catalog, serversRoot: t.TempDir()}
+	request := Request{
+		CreateType: CreateSteamGame, Name: `Test; $(echo safe)`, SteamSlug: "valheim", Port: 2456,
+	}
+	if err := service.Validate(request); err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("missing password error = %v, want required option", err)
+	}
+	request.SteamOptions = map[string]string{"password": "1234"}
+	if err := service.Validate(request); err == nil || !strings.Contains(err.Error(), "at least 5") {
+		t.Fatalf("short password error = %v, want min length", err)
+	}
+	request.SteamOptions = map[string]string{"password": "a secure test password"}
+	if err := service.Validate(request); err != nil {
+		t.Fatalf("valid typed launch options rejected: %v", err)
+	}
+	request.Port = 65535
+	if err := service.Validate(request); err == nil || !strings.Contains(err.Error(), "query_port") {
+		t.Fatalf("port 65535 error = %v, want default query-port range error", err)
+	}
+	request.Port = 65534
+	if err := service.Validate(request); err != nil {
+		t.Fatalf("game port 65534 with default query port 65535 rejected: %v", err)
 	}
 }

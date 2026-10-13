@@ -137,6 +137,9 @@ func (h *Hub) canSubscribe(cl *client, topic string) bool {
                 return true
         case topic == "notifications":
                 return true
+	case topic == "creation":
+		// Installation output is filtered to the event's user in deliverTo.
+		return true
         case strings.HasPrefix(topic, "server."):
                 serverID := strings.TrimSuffix(strings.TrimPrefix(topic, "server."), ".terminal")
                 if !cl.principal.HasServerAccess(serverID) {
@@ -174,6 +177,16 @@ func (h *Hub) broadcast(ev events.Event) {
 // Called with h.mu held; topic reads take cl.mu because the reader
 // goroutine mutates topics under the same mutex.
 func (h *Hub) deliverTo(cl *client, ev events.Event) bool {
+	if ev.Type == events.EvSteamCmdOutput {
+		cl.mu.Lock()
+		subscribed := cl.topics["creation"]
+		cl.mu.Unlock()
+		if !subscribed {
+			return false
+		}
+		userID, ok := eventUserID(ev.Data)
+		return ok && userID == cl.userID
+	}
         if ev.ServerID != "" {
                 topic := "server." + ev.ServerID
                 if ev.Type == events.EvVtermNewLine {
@@ -205,7 +218,23 @@ func (h *Hub) deliverTo(cl *client, ev events.Event) bool {
         return ok
 }
 
+func eventUserID(data interface{}) (int64, bool) {
+	switch value := data.(type) {
+	case map[string]interface{}:
+		userID, ok := value["user_id"].(int64)
+		return userID, ok
+	case map[string]int64:
+		userID, ok := value["user_id"]
+		return userID, ok
+	default:
+		return 0, false
+	}
+}
+
 func topicFor(ev events.Event) string {
+	if ev.Type == events.EvSteamCmdOutput {
+		return "creation"
+	}
         if ev.ServerID != "" {
                 if ev.Type == events.EvVtermNewLine {
                         return "server." + ev.ServerID + ".terminal"

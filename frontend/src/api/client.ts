@@ -164,6 +164,8 @@ export interface ServerDef {
   created: string;
   server_name: string;
   type: string;
+  app_id?: string;
+  steam_manifest?: boolean;
   path?: string;
   executable?: string;
   execution_command?: string;
@@ -326,23 +328,68 @@ export interface HostStatsSnapshot {
   os: string;
 }
 
+export interface ExposedGamePort {
+  port?: number;
+  proto?: "tcp" | "udp";
+  optional?: boolean;
+  offset?: number;
+}
+
+export interface SteamConfigEditor {
+  path: string;
+  label?: string;
+  description?: string;
+  editor?: "auto" | "raw" | "lines";
+}
+
+export interface SteamLaunchOptionValue {
+  value: string;
+  label: string;
+}
+
+export interface SteamLaunchOption {
+  key: string;
+  label: string;
+  description?: string;
+  type: "text" | "password" | "number" | "boolean" | "select";
+  flag?: string;
+  flag_separator?: string;
+  source?: "server_name" | "port" | "query_port" | "save_dir";
+  default?: string;
+  required?: boolean;
+  min?: number;
+  max?: number;
+  min_length?: number;
+  max_length?: number;
+  true_value?: string;
+  false_value?: string;
+  options?: SteamLaunchOptionValue[];
+}
+
 export interface SteamGame {
   app_id: number;
   name: string;
   slug: string;
+  type?: "steam_cmd";
   run_command: string;
   executable: string;
+  stop_command?: string;
   port: number;
-  port_name: string;
-  workshop: boolean;
+  port_name?: string;
+  workshop?: boolean;
   config_files?: string[];
+  config_editors?: SteamConfigEditor[];
+  launch_options?: SteamLaunchOption[];
+  expose?: ExposedGamePort[];
   windows_only?: boolean;
   query_port?: number;
-  platform?: string;
+  platform?: "linux" | "windows";
   docker_image?: string;
+  env?: Record<string, string[]>;
   save_dirs?: string[];
   backup_dirs?: string[];
   notes?: string;
+  custom?: boolean;
 }
 
 export interface JavaInstall {

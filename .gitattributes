@@ -1,0 +1,2 @@
+# Container entrypoints are executed directly; preserve a Unix shebang/newlines.
+docker/steamcmd-wine/entrypoint.sh text eol=lf

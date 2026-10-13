@@ -3,14 +3,18 @@ package servers
 import (
 	"archive/zip"
 	"fmt"
-	"github.com/FlameInTheDark/servy/internal/events"
-	"github.com/FlameInTheDark/servy/internal/models"
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/FlameInTheDark/servy/internal/events"
+	"github.com/FlameInTheDark/servy/internal/files"
+	"github.com/FlameInTheDark/servy/internal/models"
+	"github.com/FlameInTheDark/servy/internal/safehttp"
 )
 
 // UpdateManager handles executable updates per server type:
@@ -94,41 +98,35 @@ func (u *UpdateManager) updateFromURL(url, dest string) error {
 	if url == "" {
 		return fmt.Errorf("no executable_update_url set")
 	}
-	resp, err := http.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download returned %d", resp.StatusCode)
-	}
 	tmp := dest + ".download"
-	f, err := os.Create(tmp)
-	if err != nil {
+	_ = os.Remove(tmp)
+	if _, err := files.DownloadURL(url, tmp); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	f.Close()
 	if err := os.Rename(tmp, dest); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
-	os.Chmod(dest, 0o755)
+	if err := os.Chmod(dest, 0o755); err != nil {
+		return err
+	}
 	return nil
 }
 
 // updateBedrock fetches the latest bedrock dedicated server zip and extracts
 // over the server directory (skipping world/ and server.properties).
 func (u *UpdateManager) updateBedrock(serverPath string) error {
-	// discover the real zip URL from the download page
+	const maxArchiveBytes int64 = 2 << 30
+	const maxExpandedBytes int64 = 8 << 30
+	const maxEntries = 100_000
+
 	zipURL, err := u.discoverBedrockURL()
 	if err != nil {
 		return err
 	}
-	resp, err := http.Get(zipURL)
+	client := safehttp.NewClient(15 * time.Minute)
+	resp, err := client.Get(zipURL)
 	if err != nil {
 		return err
 	}
@@ -136,50 +134,119 @@ func (u *UpdateManager) updateBedrock(serverPath string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("bedrock download returned %d", resp.StatusCode)
 	}
+	if resp.ContentLength > maxArchiveBytes {
+		return fmt.Errorf("bedrock archive exceeds the 2 GiB download limit")
+	}
 	tmp, err := os.CreateTemp("", "bedrock-*.zip")
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	written, err := io.Copy(tmp, io.LimitReader(resp.Body, maxArchiveBytes+1))
+	if err != nil {
+		tmp.Close()
 		return err
 	}
+	if written > maxArchiveBytes {
 	tmp.Close()
-	// open & extract over the dir
-	zr, err := zip.OpenReader(tmp.Name())
+		return fmt.Errorf("bedrock archive exceeds the 2 GiB download limit")
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	zr, err := zip.OpenReader(tmpName)
 	if err != nil {
 		return err
 	}
 	defer zr.Close()
+	if len(zr.File) > maxEntries {
+		return fmt.Errorf("bedrock archive contains more than %d entries", maxEntries)
+	}
+	type archiveEntry struct {
+		file *zip.File
+		name string
+		skip bool
+	}
+	entries := make([]archiveEntry, 0, len(zr.File))
+	var declaredBytes uint64
 	for _, f := range zr.File {
-		name := filepath.Clean(f.Name)
-		if strings.Contains(name, "..") {
+		name := path.Clean(strings.ReplaceAll(f.Name, `\`, "/"))
+		drivePath := len(name) >= 2 && ((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z')) && name[1] == ':'
+		if strings.ContainsRune(name, '\x00') || path.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") || drivePath {
+			return files.ErrTraversal
+		}
+		mode := f.Mode()
+		if !mode.IsRegular() && !mode.IsDir() {
+			return fmt.Errorf("bedrock archive entry %q is not a regular file or directory", f.Name)
+		}
+		skip := name == "server.properties" || strings.HasPrefix(name, "worlds/")
+		if !skip && !mode.IsDir() {
+			if f.UncompressedSize64 > uint64(maxExpandedBytes)-declaredBytes {
+				return fmt.Errorf("bedrock archive expands beyond the 8 GiB extraction limit")
+			}
+			declaredBytes += f.UncompressedSize64
+		}
+		entries = append(entries, archiveEntry{file: f, name: name, skip: skip})
+	}
+
+	serverRoot, err := filepath.Abs(serverPath)
+	if err != nil {
+		return fmt.Errorf("resolve server directory: %w", err)
+	}
+	var extractedBytes int64
+	for _, entry := range entries {
+		if entry.skip || entry.name == "." || entry.name == "" {
 			continue
 		}
-		// preserve user files
-		if f.Name == "server.properties" || strings.HasPrefix(f.Name, "worlds/") {
+		target := filepath.Join(serverRoot, filepath.FromSlash(entry.name))
+		targetRel, err := filepath.Rel(serverRoot, target)
+		if err != nil || targetRel == ".." || strings.HasPrefix(targetRel, ".."+string(os.PathSeparator)) {
+			return files.ErrTraversal
+		}
+		if entry.file.Mode().IsDir() {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
 			continue
 		}
-		dest := filepath.Join(serverPath, name)
-		if f.FileInfo().IsDir() {
-			os.MkdirAll(dest, 0o755)
-			continue
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
 		}
-		os.MkdirAll(filepath.Dir(dest), 0o755)
-		rc, err := f.Open()
+		rc, err := entry.file.Open()
 		if err != nil {
-			continue
+			return err
 		}
-		out, err := os.Create(dest)
+		out, err := os.Create(target)
 		if err != nil {
 			rc.Close()
-			continue
+			return err
 		}
-		io.Copy(out, rc)
-		out.Close()
-		rc.Close()
-		if isExecutableName(f.Name) {
-			os.Chmod(dest, 0o755)
+		remaining := maxExpandedBytes - extractedBytes
+		n, copyErr := io.Copy(out, io.LimitReader(rc, remaining+1))
+		closeOutErr := out.Close()
+		closeInErr := rc.Close()
+		extractedBytes += n
+		if extractedBytes > maxExpandedBytes {
+			return fmt.Errorf("bedrock archive expands beyond the 8 GiB extraction limit")
+		}
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeOutErr != nil {
+			return closeOutErr
+		}
+		if closeInErr != nil {
+			return closeInErr
+		}
+		if uint64(n) != entry.file.UncompressedSize64 {
+			return fmt.Errorf("bedrock archive entry %q has an inconsistent uncompressed size", entry.name)
+		}
+		if isExecutableName(entry.name) {
+			if err := os.Chmod(target, 0o755); err != nil {
+				return err
+		}
 		}
 	}
 	return nil
@@ -192,7 +259,7 @@ func isExecutableName(name string) bool {
 
 // discoverBedrockURL scrapes the Mojang page for the linux dedicated server link.
 func (u *UpdateManager) discoverBedrockURL() (string, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := safehttp.NewClient(15 * time.Second)
 	for _, page := range bedrockDownloadURLs {
 		resp, err := client.Get(page)
 		if err != nil {

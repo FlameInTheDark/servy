@@ -4,7 +4,9 @@ import (
         "encoding/json"
         "fmt"
         "os"
+        "path"
         "path/filepath"
+        "sort"
         "strconv"
         "strings"
 
@@ -17,6 +19,7 @@ import (
         "github.com/FlameInTheDark/servy/internal/models"
         "github.com/FlameInTheDark/servy/internal/repo/gen"
         "github.com/FlameInTheDark/servy/internal/servers"
+        "github.com/FlameInTheDark/servy/internal/steamcmd"
 )
 
 func (a *App) mountServers(api fiber.Router) {
@@ -46,8 +49,10 @@ func (a *App) mountServers(api fiber.Router) {
         api.Get("/servers/:id/players", a.serverPlayers)
         api.Get("/servers/:id/terminal", a.serverTerminal)
 
-        // config editor (visual + raw)
+        // config editor (visual + raw); the query form supports nested paths.
         api.Get("/servers/:id/config", a.serverConfigList)
+        api.Get("/servers/:id/config-file", a.serverConfigGet)
+        api.Put("/servers/:id/config-file", a.serverConfigPut)
         api.Get("/servers/:id/config/:file", a.serverConfigGet)
         api.Put("/servers/:id/config/:file", a.serverConfigPut)
 
@@ -114,6 +119,9 @@ func (a *App) serverView(def gen.Server, rt *models.ServerRuntime) map[string]in
         }
         if def.AppID != nil {
                 v["app_id"] = *def.AppID
+        }
+        if snapshot, err := steamcmd.GameSnapshotFromDefinitions(def.Definitions); err == nil && snapshot != nil {
+                v["steam_manifest"] = true
         }
         // Live stats block. ALWAYS emitted with zero defaults for stopped,
         // remote-managed or not-yet-registered servers: the UI renders these
@@ -439,6 +447,11 @@ func applyServerPatch(def *gen.Server, patch map[string]interface{}) {
         if v, ok := patch["docker_autoremove"]; ok {
                 def.DockerAutoremove = boolI(v)
         }
+        if def.Type == models.TypeSteamCmd {
+                if snapshot, err := steamcmd.GameSnapshotFromDefinitions(def.Definitions); err == nil && snapshot != nil {
+                        def.Shell = "none"
+                }
+        }
 }
 
 func (a *App) deleteServer(c fiber.Ctx) error {
@@ -754,25 +767,123 @@ func (a *App) serverConfigList(c fiber.Ctx) error {
                 return nil
         }
         def := sup.Definition()
-        guard, _ := files.NewGuard(def.Path)
-        entries, _ := a.Files.List(guard, "")
-        known := []map[string]interface{}{}
-        for _, e := range entries {
-                n := strings.ToLower(e.Name)
+        guard, err := files.NewGuard(def.Path)
+        if err != nil {
+                return failMsg(c, 500, "CONFIG_LIST_FAILED", err.Error())
+        }
+        entries, err := a.Files.List(guard, "")
+        if err != nil {
+                return failMsg(c, 500, "CONFIG_LIST_FAILED", err.Error())
+        }
+        known := map[string]map[string]interface{}{}
+        addFile := func(file string, label, description, editor string) {
+                normalized := path.Clean(strings.ReplaceAll(file, `\`, "/"))
+                if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || strings.HasPrefix(normalized, "/") {
+                        return
+                }
+                n := strings.ToLower(normalized)
+                info := map[string]interface{}{"file": normalized, "mode": "raw", "format": "text"}
                 switch {
                 case n == "server.properties":
-                        known = append(known, map[string]interface{}{"file": e.Name, "mode": "visual+raw", "format": "properties"})
+                        info["mode"], info["format"] = "visual+raw", "properties"
                 case strings.HasSuffix(n, ".json"):
-                        known = append(known, map[string]interface{}{"file": e.Name, "mode": "raw", "format": "json"})
+                        info["format"] = "json"
                 case strings.HasSuffix(n, ".yml") || strings.HasSuffix(n, ".yaml"):
-                        known = append(known, map[string]interface{}{"file": e.Name, "mode": "raw", "format": "yaml"})
+                        info["format"] = "yaml"
                 case strings.HasSuffix(n, ".properties") || strings.HasSuffix(n, ".ini") || strings.HasSuffix(n, ".conf") || strings.HasSuffix(n, ".cfg"):
-                        known = append(known, map[string]interface{}{"file": e.Name, "mode": "raw", "format": "properties"})
-                case strings.HasSuffix(n, ".txt") || strings.HasSuffix(n, ".xml"):
-                        known = append(known, map[string]interface{}{"file": e.Name, "mode": "raw", "format": "text"})
+                        info["format"] = "properties"
+                case strings.HasSuffix(n, ".xml"):
+                        info["format"] = "xml"
+                }
+                if label != "" {
+                        info["label"] = label
+                }
+                if description != "" {
+                        info["description"] = description
+                }
+                if editor == "lines" {
+                        info["editor"] = "lines"
+                        info["mode"] = "lines"
+                }
+                known[normalized] = info
+        }
+        for _, entry := range entries {
+                if entry.Dir {
+                        continue
+                }
+                n := strings.ToLower(entry.Name)
+                if n == "server.properties" || strings.HasSuffix(n, ".json") || strings.HasSuffix(n, ".yml") ||
+                        strings.HasSuffix(n, ".yaml") || strings.HasSuffix(n, ".properties") || strings.HasSuffix(n, ".ini") ||
+                        strings.HasSuffix(n, ".conf") || strings.HasSuffix(n, ".cfg") || strings.HasSuffix(n, ".txt") || strings.HasSuffix(n, ".xml") {
+                        addFile(entry.Name, "", "", "")
                 }
         }
-        return ok(c, known)
+
+        game, hasGame, err := a.serverGameManifest(def)
+        if err != nil {
+                return failMsg(c, 500, "INVALID_SERVER_DEFINITION", err.Error())
+        }
+        if hasGame {
+                for _, declared := range game.ConfigFiles {
+                        file := path.Clean(strings.ReplaceAll(declared, `\`, "/"))
+                        if stat, err := a.Files.Stat(guard, file); err == nil && !stat.Dir {
+                                addFile(file, "", "", "")
+                        }
+                }
+                for _, descriptor := range game.ConfigEditors {
+                        file := path.Clean(strings.ReplaceAll(descriptor.Path, `\`, "/"))
+                        if stat, err := a.Files.Stat(guard, file); err == nil && !stat.Dir {
+                                addFile(file, descriptor.Label, descriptor.Description, descriptor.Editor)
+                        }
+                }
+        }
+
+        filesList := make([]map[string]interface{}, 0, len(known))
+        for _, info := range known {
+                filesList = append(filesList, info)
+        }
+        sort.Slice(filesList, func(i, j int) bool {
+                left := strings.ToLower(filesList[i]["file"].(string))
+                right := strings.ToLower(filesList[j]["file"].(string))
+                if left == right {
+                        return filesList[i]["file"].(string) < filesList[j]["file"].(string)
+                }
+                return left < right
+        })
+        return ok(c, filesList)
+}
+
+func (a *App) serverGameManifest(def gen.Server) (steamcmd.Game, bool, error) {
+        if snapshot, err := steamcmd.GameSnapshotFromDefinitions(def.Definitions); err != nil {
+                return steamcmd.Game{}, false, err
+        } else if snapshot != nil {
+                return snapshot.Game, true, nil
+        }
+        if a.SteamCatalog != nil && def.AppID != nil && *def.AppID != "" {
+                game, ok := a.SteamCatalog.ByAppID(*def.AppID)
+                return game, ok, nil
+        }
+        return steamcmd.Game{}, false, nil
+}
+
+func configFileParam(c fiber.Ctx) string {
+        file := c.Params("file")
+        if file == "" {
+                file = c.Query("path")
+        }
+        return file
+}
+
+func normalizeConfigFilePath(file string) (string, error) {
+        if strings.TrimSpace(file) == "" || strings.ContainsRune(file, '\x00') {
+                return "", files.ErrTraversal
+        }
+        normalized := path.Clean(strings.ReplaceAll(file, `\`, "/"))
+        drivePath := len(normalized) >= 2 && ((normalized[0] >= 'a' && normalized[0] <= 'z') || (normalized[0] >= 'A' && normalized[0] <= 'Z')) && normalized[1] == ':'
+        if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || strings.HasPrefix(normalized, "/") || drivePath {
+                return "", files.ErrTraversal
+        }
+        return normalized, nil
 }
 
 func (a *App) serverConfigGet(c fiber.Ctx) error {
@@ -781,11 +892,14 @@ func (a *App) serverConfigGet(c fiber.Ctx) error {
                 return nil
         }
         def := sup.Definition()
-        file := c.Params("file")
-        if strings.Contains(file, "..") {
+        file, err := normalizeConfigFilePath(configFileParam(c))
+        if err != nil {
                 return fail(c, 400, "TRAVERSAL DETECTED")
         }
-        guard, _ := files.NewGuard(def.Path)
+        guard, err := files.NewGuard(def.Path)
+        if err != nil {
+                return failMsg(c, 500, "CONFIG_READ_FAILED", err.Error())
+        }
         data, err := a.Files.Read(guard, file, 16<<20)
         if err != nil {
                 return fail(c, 404, "NOT_FOUND")
@@ -806,8 +920,8 @@ func (a *App) serverConfigPut(c fiber.Ctx) error {
                 return nil
         }
         def := sup.Definition()
-        file := c.Params("file")
-        if strings.Contains(file, "..") {
+        file, err := normalizeConfigFilePath(configFileParam(c))
+        if err != nil {
                 return fail(c, 400, "TRAVERSAL DETECTED")
         }
         var req struct {
@@ -818,7 +932,10 @@ func (a *App) serverConfigPut(c fiber.Ctx) error {
         if err := parseBody(c, &req); err != nil {
                 return err
         }
-        guard, _ := files.NewGuard(def.Path)
+        guard, err := files.NewGuard(def.Path)
+        if err != nil {
+                return failMsg(c, 500, "CONFIG_WRITE_FAILED", err.Error())
+        }
         n := strings.ToLower(file)
         switch req.Mode {
         case "visual":
