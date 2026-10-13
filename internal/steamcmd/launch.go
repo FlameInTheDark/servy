@@ -14,8 +14,8 @@ import (
 var launchOptionKeyPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 // ResolveLaunchOptions turns the values supplied for one server into argv
-// elements. Flags and values remain separate arguments all the way to exec or
-// Docker; callers must not concatenate these into a shell command string.
+// elements. Flags and values are separate unless flag_separator explicitly joins
+// them into one element; callers must not concatenate these into a shell command.
 func ResolveLaunchOptions(options []LaunchOption, values map[string]string, context LaunchContext) ([]string, map[string]string, error) {
 	if err := validateLaunchOptions(options); err != nil {
 		return nil, nil, err
@@ -72,12 +72,21 @@ func ResolveLaunchOptions(options []LaunchOption, values map[string]string, cont
 			appendBooleanOption(&args, option, value == "true")
 			continue
 		}
-		if option.Flag != "" {
-			args = append(args, option.Flag)
-		}
-		args = append(args, value)
+		appendFlagValue(&args, option, value)
 	}
 	return args, resolved, nil
+}
+
+func appendFlagValue(args *[]string, option LaunchOption, value string) {
+	if option.Flag == "" {
+		*args = append(*args, value)
+		return
+	}
+	if option.FlagSeparator != "" {
+		*args = append(*args, option.Flag+option.FlagSeparator+value)
+		return
+	}
+	*args = append(*args, option.Flag, value)
 }
 
 func appendBooleanOption(args *[]string, option LaunchOption, enabled bool) {
@@ -87,9 +96,13 @@ func appendBooleanOption(args *[]string, option LaunchOption, enabled bool) {
 	}
 	if option.Flag != "" {
 		if enabled || mappedValue != "" {
-			*args = append(*args, option.Flag)
-			if mappedValue != "" {
-				*args = append(*args, mappedValue)
+			if mappedValue != "" && option.FlagSeparator != "" {
+				*args = append(*args, option.Flag+option.FlagSeparator+mappedValue)
+			} else {
+				*args = append(*args, option.Flag)
+				if mappedValue != "" {
+					*args = append(*args, mappedValue)
+				}
 			}
 		}
 		return
@@ -151,6 +164,12 @@ func validateLaunchOptions(options []LaunchOption) error {
 		}
 		if len(option.Flag) > 128 || hasWhitespaceOrControl(option.Flag) {
 			return fmt.Errorf("%s.flag must be a single argument with no whitespace or control characters", where)
+		}
+		if utf8.RuneCountInString(option.FlagSeparator) > 16 || hasWhitespaceOrControl(option.FlagSeparator) {
+			return fmt.Errorf("%s.flag_separator must be at most 16 characters with no whitespace or control characters", where)
+		}
+		if option.FlagSeparator != "" && option.Flag == "" {
+			return fmt.Errorf("%s.flag_separator requires flag", where)
 		}
 		if option.Source != "" {
 			expectedType := map[string]string{

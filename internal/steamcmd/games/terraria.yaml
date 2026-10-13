@@ -5,11 +5,25 @@ name: "Terraria (TShock)"
 # TerrariaServer binary; the Steam depot alone only provides the vanilla
 # server). -autocreate generates the world on first boot so the server
 # starts headless without the interactive world wizard.
-run_command: './tshock/TerrariaServer -port {PORT} -world {SAVE_DIR}/servy.wld -autocreate 2'
+run_command: './tshock/TerrariaServer -port {PORT} -world {SAVE_DIR}/servy.wld'
 executable: "tshock/TerrariaServer"
 stop_command: "exit"
 port: 7777
 port_name: "game"
+launch_options:
+  - key: world_size
+    label: New world size
+    description: Size used only when Terraria creates a new world; existing worlds are unchanged.
+    type: select
+    flag: -autocreate
+    default: "2"
+    options:
+      - value: "1"
+        label: Small
+      - value: "2"
+        label: Medium
+      - value: "3"
+        label: Large
 notes: "Upload TShock into the tshock/ folder first (the Steam depot does not include it). Worlds are auto-created under saves/ on first start."
 # Terraria is TCP-only (the TShock REST API shares the port when enabled).
 expose:

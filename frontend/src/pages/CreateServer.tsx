@@ -407,7 +407,7 @@ export default function CreateServerPage() {
                     <div>
                       <div className="text-sm font-medium">Server launch parameters</div>
                       <p className="mt-1 text-xs text-muted-foreground">
-                        These typed values are added as separate command arguments. Parameters marked as automatic use the server name or port above.
+                        These typed values are passed as command arguments, not shell text. Parameters marked as automatic use the server name or port above.
                       </p>
                     </div>
                     {pickedSteam.launch_options.map((option: SteamLaunchOption) => {

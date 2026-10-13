@@ -353,6 +353,7 @@ export interface SteamLaunchOption {
   description?: string;
   type: "text" | "password" | "number" | "boolean" | "select";
   flag?: string;
+  flag_separator?: string;
   source?: "server_name" | "port" | "query_port" | "save_dir";
   default?: string;
   required?: boolean;

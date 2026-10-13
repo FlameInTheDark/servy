@@ -1,7 +1,7 @@
 app_id: 896660
 slug: "valheim"
 name: "Valheim"
-run_command: './valheim_server.x86_64 -public 1 -savedir {SAVE_DIR}'
+run_command: './valheim_server.x86_64 -savedir {SAVE_DIR}'
 executable: "valheim_server.x86_64"
 stop_command: "stop"
 port: 2456
@@ -24,6 +24,14 @@ launch_options:
     flag: -port
     min: 1
     max: 65534
+  - key: public
+    label: Public listing
+    description: Show the server in Valheim's public server browser; turn off for an unlisted server.
+    type: boolean
+    flag: -public
+    default: "true"
+    true_value: "1"
+    false_value: "0"
   - key: world
     label: World name
     description: World save name. Use the existing world's name to load it.

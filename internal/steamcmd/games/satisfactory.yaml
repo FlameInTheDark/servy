@@ -1,11 +1,24 @@
 app_id: 1690800
 slug: "satisfactory"
 name: "Satisfactory"
-run_command: './FactoryServer.sh -Port={PORT} -unattended -log -savedir {SAVE_DIR}'
+run_command: './FactoryServer.sh -Port={PORT} -savedir {SAVE_DIR}'
 executable: "FactoryServer.sh"
 stop_command: "quit"
 port: 7777
 port_name: "game"
+launch_options:
+  - key: unattended
+    label: Unattended mode
+    description: Run without interactive dialogs; recommended for dedicated servers.
+    type: boolean
+    flag: -unattended
+    default: "true"
+  - key: log_output
+    label: Log output
+    description: Enable Unreal log output.
+    type: boolean
+    flag: -log
+    default: "true"
 # Satisfactory: game + Steam query on 7777 (UDP; TCP kept for legacy client
 # paths), API/beacon on 15000/tcp. Configurable via -Port and the ini files.
 expose:

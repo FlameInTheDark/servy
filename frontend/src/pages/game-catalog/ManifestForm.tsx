@@ -193,7 +193,11 @@ function LaunchOptionCard({
             <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
               <Badge variant="muted" className="font-mono text-[10px]">{option.key || "option_key"}</Badge>
               <Badge variant="outline" className="text-[10px]">{option.source ? "automatic" : option.type}</Badge>
-              {option.flag && <code className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{option.flag}</code>}
+              {option.flag && (
+                <code className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                  {option.flag}{option.flag_separator ? `${option.flag_separator}value` : ""}
+                </code>
+              )}
             </div>
           </div>
         </div>
@@ -219,7 +223,15 @@ function LaunchOptionCard({
           ]} />
         </Field>
         <Field label="Command flag" hint="Optional single argv token, e.g. -world.">
-          <Input value={option.flag || ""} onChange={(event) => onChange({ flag: event.target.value || undefined })} placeholder="-world" className="font-mono text-xs" />
+          <Input
+            value={option.flag || ""}
+            onChange={(event) => onChange({
+              flag: event.target.value || undefined,
+              ...(event.target.value ? {} : { flag_separator: undefined }),
+            })}
+            placeholder="-world"
+            className="font-mono text-xs"
+          />
         </Field>
       </div>
 
@@ -262,6 +274,16 @@ function LaunchOptionCard({
               <Switch checked={!!option.required} onCheckedChange={(required) => onChange({ required })} />
             </div>
           </div>
+          <Field label="Flag/value separator" hint="Leave blank for separate argv items; use = when the game expects one token like -flag=value.">
+            <Input
+              value={option.flag_separator || ""}
+              maxLength={16}
+              disabled={!option.flag}
+              onChange={(event) => onChange({ flag_separator: event.target.value || undefined })}
+              placeholder={option.flag ? "Separate arguments" : "Add a flag first"}
+              className="font-mono text-xs"
+            />
+          </Field>
 
           {option.type === "number" && (
             <div className="grid gap-3 sm:grid-cols-2">
@@ -462,7 +484,7 @@ export default function ManifestForm({ game, onChange }: { game: SteamGame; onCh
         </div>
       </Section>
 
-      <Section index="02 / startup" title="Install & startup commands" description="Servy downloads the Steam app, then runs this command directly. Launch-option values are passed as separate arguments—not through a shell." icon={Boxes}>
+      <Section index="02 / startup" title="Install & startup commands" description="Servy downloads the Steam app, then runs this command directly. Launch-option values stay in argv (use flag_separator when a game requires -flag=value); Servy does not build a shell command from them." icon={Boxes}>
         <Field label="Run command" hint="Placeholders are available: {SERVER_NAME}, {PORT}, {QUERY_PORT}, {SAVE_DIR}. Use one command line; do not put user-supplied values into shell syntax.">
           <Input value={game.run_command || ""} onChange={(event) => patchGame({ run_command: event.target.value })} placeholder="./server -port {PORT} -savedir {SAVE_DIR}" className="font-mono text-xs" />
         </Field>

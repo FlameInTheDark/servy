@@ -85,23 +85,25 @@ type ConfigFileEditor struct {
 }
 
 // LaunchOption describes one typed value collected when a Steam game server is
-// created and appended to its command as a separate, safely quoted argument.
+// created and appended to its command as safe argv elements. A flag separator
+// can join a flag and value into one element for games that require -flag=value.
 type LaunchOption struct {
-	Key         string              `json:"key" yaml:"key"`
-	Label       string              `json:"label" yaml:"label"`
-	Description string              `json:"description,omitempty" yaml:"description,omitempty"`
-	Type        string              `json:"type" yaml:"type"` // text | password | number | boolean | select
-	Flag        string              `json:"flag,omitempty" yaml:"flag,omitempty"`
-	Source      string              `json:"source,omitempty" yaml:"source,omitempty"` // server_name | port | query_port | save_dir
-	Default     string              `json:"default,omitempty" yaml:"default,omitempty"`
-	Required    bool                `json:"required,omitempty" yaml:"required,omitempty"`
-	Min         *int                `json:"min,omitempty" yaml:"min,omitempty"`
-	Max         *int                `json:"max,omitempty" yaml:"max,omitempty"`
-	MinLength   *int                `json:"min_length,omitempty" yaml:"min_length,omitempty"`
-	MaxLength   *int                `json:"max_length,omitempty" yaml:"max_length,omitempty"`
-	TrueValue   string              `json:"true_value,omitempty" yaml:"true_value,omitempty"`
-	FalseValue  string              `json:"false_value,omitempty" yaml:"false_value,omitempty"`
-	Options     []LaunchOptionValue `json:"options,omitempty" yaml:"options,omitempty"`
+	Key           string              `json:"key" yaml:"key"`
+	Label         string              `json:"label" yaml:"label"`
+	Description   string              `json:"description,omitempty" yaml:"description,omitempty"`
+	Type          string              `json:"type" yaml:"type"` // text | password | number | boolean | select
+	Flag          string              `json:"flag,omitempty" yaml:"flag,omitempty"`
+	FlagSeparator string              `json:"flag_separator,omitempty" yaml:"flag_separator,omitempty"`
+	Source        string              `json:"source,omitempty" yaml:"source,omitempty"` // server_name | port | query_port | save_dir
+	Default       string              `json:"default,omitempty" yaml:"default,omitempty"`
+	Required      bool                `json:"required,omitempty" yaml:"required,omitempty"`
+	Min           *int                `json:"min,omitempty" yaml:"min,omitempty"`
+	Max           *int                `json:"max,omitempty" yaml:"max,omitempty"`
+	MinLength     *int                `json:"min_length,omitempty" yaml:"min_length,omitempty"`
+	MaxLength     *int                `json:"max_length,omitempty" yaml:"max_length,omitempty"`
+	TrueValue     string              `json:"true_value,omitempty" yaml:"true_value,omitempty"`
+	FalseValue    string              `json:"false_value,omitempty" yaml:"false_value,omitempty"`
+	Options       []LaunchOptionValue `json:"options,omitempty" yaml:"options,omitempty"`
 }
 
 // LaunchOptionValue is one choice for a select launch option.
