@@ -82,7 +82,7 @@ Full compose reference, volumes and ports: [`docs/docker.md`](docs/docker.md).
 servy serve [--data DIR]       # Run the panel (API + WS + UI + engine)
 servy setup [-u -p]            # Create the first admin user
 servy user add|list|passwd     # User management
-servy agent run --panel HOST:PORT --ticket T  # Join a panel and run as a node
+servy agent run --panel HOST:PORT --ticket T  # Join a panel and run as a node (or: servy --agent run …)
 servy manifest list|add        # Manage server-creation recipe manifests
 servy game-manifest list|validate|add|remove  # Manage SteamCMD game definitions
 servy agent status|leave       # Node registration state / forget credentials

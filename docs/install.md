@@ -25,17 +25,17 @@ Every tagged release publishes archives for `linux/amd64`, `linux/arm64`,
 # pick the archive for your platform from the Releases page, then:
 tar -xzf servy_1.2.3_linux_amd64.tar.gz
 sudo install -m 0755 servy_1.2.3_linux_amd64/servy /usr/local/bin/servy
-sudo install -m 0755 servy_1.2.3_linux_amd64/servy-agent /usr/local/bin/servy-agent
 
 servy version        # servy 1.2.3 (commit …, built …)
 ```
 
-Archives contain two binaries:
+There is **one binary for both roles**. The same `servy` file runs the panel
+and, on another machine, the headless cluster node agent:
 
-| Binary | What it is |
-| --- | --- |
-| `servy` | The panel **and** the node agent (`servy agent …` subcommands) |
-| `servy-agent` | Tiny wrapper that simply calls `servy agent`, for hosts where only the agent should exist |
+```bash
+servy serve                        # panel (web UI + API + local servers)
+servy agent run --panel … --ticket …   # or: servy --agent run --panel … --ticket …
+```
 
 `servy` works on Windows too (`servy.exe`); put it anywhere on your `PATH`.
 
@@ -47,14 +47,14 @@ embedded into the binary with `go:embed`).
 ```bash
 git clone https://github.com/FlameInTheDark/servy.git
 cd servy
-make build          # frontend + backend → bin/servy, bin/servy-agent
+make build          # frontend + backend → bin/servy
 ```
 
 Handy targets:
 
 | Command | Result |
 | --- | --- |
-| `make build` | Frontend + both binaries in `bin/` |
+| `make build` | Frontend + the `servy` binary in `bin/` |
 | `make api` | Backend only, with a placeholder UI (API + websocket still work) |
 | `make test` | `go test ./...` |
 | `make release VERSION=v1.2.3` | Cross-platform archives in `dist/` |
@@ -252,7 +252,7 @@ hours.
 
 1. Stop the panel (`systemctl stop servy`) — running game servers are stopped
    with it (they are supervised child processes, or containers the panel owns).
-2. Replace the `servy` / `servy-agent` binaries.
+2. Replace the `servy` binary.
 3. Start the panel again. Database migrations run automatically on startup.
 
 `config.yaml` and the data directory are never touched by an upgrade. After
@@ -274,7 +274,7 @@ Every command accepts the global `--data DIR` / `-d DIR` flag (or
 | `servy user passwd -u USER -p PASS` | Change a password (invalidates sessions) |
 | `servy migrate status` | Show the database location and migration state |
 | `servy import --db PATH [--config-dir DIR]` | Import a legacy panel installation |
-| `servy agent run [--panel HOST:PORT] [--ticket T] [--name N] [--advertise A] [--grpc-port 50052]` | Join/run as a cluster node — see [`cluster.md`](cluster.md) |
+| `servy agent run [--panel HOST:PORT] [--ticket T] [--name N] [--advertise A] [--grpc-port 50052]` | Join/run as a cluster node — see [`cluster.md`](cluster.md). `servy --agent run …` is the same command |
 | `servy agent status` / `servy agent leave` | Node credentials state / forget them |
 | `servy node list` / `servy node whoami` | Servers this machine runs / node identity |
 | `servy manifest list\|add --file\|--url` | Server-creation recipes — see [`manifests.md`](manifests.md) |

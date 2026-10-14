@@ -112,6 +112,10 @@ servy node list             # servers this machine runs for the panel
 servy node whoami           # node identity as the panel knows it
 ```
 
+Nodes use the same binary as the panel — the agent is just a CLI mode, so
+`servy --agent run …`, `servy --agent status` and `servy --agent leave` are
+equivalent to the `servy agent …` commands above.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |

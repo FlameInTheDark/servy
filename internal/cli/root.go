@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gofiber/fiber/v3"
 	clipkg "github.com/urfave/cli/v3"
@@ -30,6 +31,7 @@ func Root() *clipkg.Command {
 		Version: version.Version,
 		Flags: []clipkg.Flag{
 			&clipkg.StringFlag{Name: "data", Aliases: []string{"d"}, Usage: "data directory (config, db, servers, backups)", Value: ""},
+			&clipkg.BoolFlag{Name: "agent", Usage: "run this machine as a cluster node (same as `servy agent …`)"},
 		},
 		Commands: []*clipkg.Command{
 			serveCommand(),
@@ -51,6 +53,55 @@ func Root() *clipkg.Command {
 			nodeCommand(),
 		},
 	}
+}
+
+// AgentModeArgs rewrites an os.Args-style command line so the global --agent
+// flag behaves exactly like the `agent` subcommand: `servy --agent run --ticket
+// T` becomes `servy --agent agent run --ticket T`. The rewrite runs before
+// parsing because the CLI library resolves the subcommand before any flag
+// value can be inspected. One binary therefore covers both roles — the panel,
+// and the headless node agent that serves servers for another panel.
+//
+// args[0] is the program name and is skipped. Scanning stops at the first
+// non-flag token (the subcommand), and values of the root --data/-d flag are
+// skipped, so `servy --data /srv --agent run` works while a later `--agent`
+// (e.g. inside `servy agent run --agent`) is left untouched for the parser to
+// reject.
+func AgentModeArgs(args []string) []string {
+	expectValue := false // the previous flag takes a value (`--data DIR`)
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if expectValue {
+			expectValue = false
+			continue
+		}
+		if !strings.HasPrefix(arg, "-") {
+			return args
+		}
+		name := strings.TrimLeft(arg, "-")
+		inlineValue := false
+		if eq := strings.IndexByte(name, '='); eq >= 0 {
+			inlineValue = true
+			if name[eq+1:] == "false" {
+				return args // --agent=false keeps the panel behaviour
+			}
+			name = name[:eq]
+		}
+		switch name {
+		case "data", "d":
+			expectValue = !inlineValue
+		case "agent":
+			if inlineValue || (i+1 < len(args) && args[i+1] == "agent") {
+				return args // already `servy --agent agent …`
+			}
+			out := make([]string, 0, len(args)+1)
+			out = append(out, args[:i+1]...)
+			out = append(out, "agent")
+			out = append(out, args[i+1:]...)
+			return out
+		}
+	}
+	return args
 }
 
 func dataDirOf(cmd *clipkg.Command) string {

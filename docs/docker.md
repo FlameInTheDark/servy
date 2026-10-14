@@ -176,6 +176,7 @@ services:
     image: ghcr.io/flameinthedark/servy:latest
     container_name: servy-node
     restart: unless-stopped
+    # `--data /data agent run …` and `--data /data --agent run …` are the same
     command: ["--data", "/data", "agent", "run", "--panel", "panel.example.org:5055", "--ticket", "<ticket>", "--grpc-port", "50052", "--advertise", "node1.example.org:50052"]
     ports:
       - "50052:50052"                      # the panel dials this

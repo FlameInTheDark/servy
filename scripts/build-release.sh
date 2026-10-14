@@ -22,11 +22,9 @@ build() { # goos goarch archive
   rm -rf "dist/${name}" && mkdir -p "dist/${name}"
   CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
     go build -trimpath -ldflags "${LDFLAGS}" -o "dist/${name}/servy" ./cmd/servy
-  CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
-    go build -trimpath -ldflags "${LDFLAGS}" -o "dist/${name}/servy-agent" ./cmd/servy-agent
+  cp README.md LICENSE CHANGELOG.md "dist/${name}/" 2>/dev/null || true
   if [ "${goos}" = "windows" ]; then
     mv "dist/${name}/servy" "dist/${name}/servy.exe"
-    mv "dist/${name}/servy-agent" "dist/${name}/servy-agent.exe"
     ( cd dist && zip -qr "${name}.zip" "${name}" )
   else
     tar -czf "dist/${name}.tar.gz" -C dist "${name}"

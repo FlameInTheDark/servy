@@ -2,7 +2,7 @@
 # ------------------------------------------------------------------------------
 # Servy — optimized multi-stage build (~500MB vs 2GB)
 #   1. frontend  : Vite build (embedded into the binary via go:embed)
-#   2. build     : static Go binaries (panel + agent) with the SPA embedded
+#   2. build     : one static Go binary (panel + node agent) with the SPA embedded
 #   3. runtime   : debian:bookworm-slim with Temurin JREs (8, 11, 17, 21)
 #                  + SteamCMD (amd64) for local installs/updates
 #                  No Docker CLI — the panel talks to the Docker Engine API
@@ -30,18 +30,13 @@ COPY --from=frontend /ui/dist internal/spa/dist
 ARG VERSION=dev
 ARG COMMIT=unknown
 ARG BUILD_DATE=unknown
+# one binary: the panel, and the node agent via `servy --agent …`
 RUN CGO_ENABLED=0 go build -trimpath \
       -ldflags "-s -w \
         -X github.com/FlameInTheDark/servy/internal/version.Version=${VERSION} \
         -X github.com/FlameInTheDark/servy/internal/version.Commit=${COMMIT} \
         -X github.com/FlameInTheDark/servy/internal/version.BuildDate=${BUILD_DATE}" \
-      -o /out/servy ./cmd/servy \
-  && CGO_ENABLED=0 go build -trimpath \
-      -ldflags "-s -w \
-        -X github.com/FlameInTheDark/servy/internal/version.Version=${VERSION} \
-        -X github.com/FlameInTheDark/servy/internal/version.Commit=${COMMIT} \
-        -X github.com/FlameInTheDark/servy/internal/version.BuildDate=${BUILD_DATE}" \
-      -o /out/servy-agent ./cmd/servy-agent
+      -o /out/servy ./cmd/servy
 
 # --- Runtime: debian-slim with Temurin JREs only ---
 FROM debian:bookworm-slim
@@ -133,9 +128,7 @@ RUN set -eux; \
     [ -d "/opt/java/16" ] || { [ -d "/opt/java/17" ] && ln -sfn "/opt/java/17" "/opt/java/16"; }; \
     [ -d "/opt/java/25" ] || { [ -d "/opt/java/21" ] && ln -sfn "/opt/java/21" "/opt/java/25"; }
 
-# Copy binaries
 COPY --from=build /out/servy /usr/local/bin/servy
-COPY --from=build /out/servy-agent /usr/local/bin/servy-agent
 
 # Create user and data dir
 RUN useradd -M -u 1000 -s /bin/bash servy \
