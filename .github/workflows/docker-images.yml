@@ -1,15 +1,18 @@
-# Builds container images and publishes them to the GitHub Container Registry
-# on every push to the default branch (and on version tags).
+# Development images: rebuilt on every push to the default branch that touches
+# the Dockerfiles, the frontend or the Go modules, and on manual dispatch.
 #
 # Published references:
 #   ghcr.io/flameinthedark/servy:latest        (main panel image)
 #   ghcr.io/flameinthedark/servy-wine:latest   (Windows game server base)
+#
+# Versioned images (`x.y.z`, `x.y`, `latest`) for a release are built and
+# pushed by the Release workflow itself — a tag pushed with the default
+# GITHUB_TOKEN does not start other workflows, so it cannot live here.
 name: docker-images
 
 on:
   push:
     branches: [master, main]
-    tags: ["v*"]
     paths:
       - "Dockerfile"
       - "docker/steamcmd-wine/**"
