@@ -101,10 +101,13 @@ func serveCommand() *clipkg.Command {
 			if app.Auth.CountUsers() == 0 {
 				app.Log.Get("auth").Warning("no users found — open the setup wizard at /setup or run `servy setup`")
 			}
-			// optional cluster gRPC
+			// optional cluster node API
 			c := cfg.Get()
 			if c.GRPCEnabled {
 				go app.StartGRPC(fmt.Sprintf(":%d", c.GRPCPort))
+				fmt.Printf("Cluster node API on :%d — add machines under Nodes → Add node\n", c.GRPCPort)
+			} else {
+				fmt.Println("Cluster nodes disabled — enable grpc_enabled to run servers on other machines")
 			}
 			addr := fmt.Sprintf("%s:%d", c.HTTPHost, c.HTTPPort)
 			fmt.Printf("Servy %s — panel listening on http://%s\n", version.Version, addr)
@@ -303,33 +306,123 @@ func importCommand() *clipkg.Command {
 func agentCommand() *clipkg.Command {
 	return &clipkg.Command{
 		Name:  "agent",
-		Usage: "run as headless cluster agent (no web UI)",
-		Flags: []clipkg.Flag{
-			&clipkg.StringFlag{Name: "panel", Required: true, Usage: "panel gRPC address (host:port)"},
-			&clipkg.StringFlag{Name: "token", Required: true, Usage: "cluster shared token"},
-			&clipkg.IntFlag{Name: "grpc-port", Value: 50052, Usage: "local gRPC listen port"},
-			&clipkg.StringFlag{Name: "name", Value: "", Usage: "node name (defaults to hostname)"},
-		},
-		Action: func(ctx context.Context, cmd *clipkg.Command) error {
-			cfg, app, err := loadConfigAndApp(cmd)
-			if err != nil {
-				return err
-			}
-			_ = cfg
-			name := cmd.String("name")
-			if name == "" {
-				name, _ = os.Hostname()
-			}
-			if err := app.Start(); err != nil {
-				return err
-			}
-			agent := cluster.NewAgent(cluster.AgentDeps{
-				DB: app.DB, Log: app.Log, Bus: app.Bus, Registry: app.Registry,
-				HostStats: app.HostStats, PanelAddr: cmd.String("panel"),
-				Token: cmd.String("token"), NodeName: name, GRPCPort: cmd.Int("grpc-port"),
-			})
-			fmt.Printf("Servy agent %s joining panel at %s (grpc :%d)\n", version.Version, cmd.String("panel"), cmd.Int("grpc-port"))
-			return agent.Run()
+		Usage: "run this machine as a cluster node (no web UI)",
+		Commands: []*clipkg.Command{
+			{
+				Name:  "run",
+				Usage: "join the panel (once) and serve servers for it",
+				Flags: []clipkg.Flag{
+					&clipkg.StringFlag{Name: "panel", Usage: "panel address host:port (defaults to the saved one)"},
+					&clipkg.StringFlag{Name: "ticket", Usage: "join ticket issued by the panel (required on first run)"},
+					&clipkg.StringFlag{Name: "name", Usage: "node name shown in the panel (defaults to hostname)"},
+					&clipkg.StringFlag{Name: "advertise", Usage: "address the panel should dial (defaults to the address this agent reports)"},
+					&clipkg.IntFlag{Name: "grpc-port", Value: 50052, Usage: "node API listen port"},
+				},
+				Action: func(ctx context.Context, cmd *clipkg.Command) error {
+					_, app, err := loadConfigAndApp(cmd)
+					if err != nil {
+						return err
+					}
+					dataDir := app.Paths.DataDir
+					creds, err := cluster.LoadCredentials(dataDir)
+					if err != nil {
+						return err
+					}
+					name := cmd.String("name")
+					if name == "" {
+						name, _ = os.Hostname()
+					}
+					panelAddr := cmd.String("panel")
+					ticket := cmd.String("ticket")
+					if ticket != "" {
+						if panelAddr == "" && creds != nil {
+							panelAddr = creds.PanelAddr
+						}
+						if panelAddr == "" {
+							return fmt.Errorf("--panel is required to join")
+						}
+						fmt.Printf("Joining panel %s ...\n", panelAddr)
+						fresh, err := cluster.Join(cluster.JoinOptions{
+							PanelAddr: panelAddr, Ticket: ticket, Name: name,
+							GRPCPort: cmd.Int("grpc-port"), Advertise: cmd.String("advertise"),
+							Version: version.Version,
+						})
+						if err != nil {
+							return err
+						}
+						if err := cluster.SaveCredentials(dataDir, fresh); err != nil {
+							return err
+						}
+						creds = fresh
+						fmt.Printf("Joined as node %q (%s). Credentials stored in %s\n",
+							fresh.Name, fresh.NodeID, cluster.CredentialsPath(dataDir))
+					} else if creds == nil {
+						return fmt.Errorf("this node has not joined a panel yet: get a ticket in the panel UI (Nodes → Add node) and run `servy agent run --panel <host:port> --ticket <ticket>`")
+					} else if panelAddr != "" && panelAddr != creds.PanelAddr {
+						return fmt.Errorf("saved credentials belong to panel %s; pass --ticket to re-join %s", creds.PanelAddr, panelAddr)
+					}
+					if creds == nil {
+						return fmt.Errorf("no node credentials")
+					}
+
+					if err := app.Start(); err != nil {
+						return err
+					}
+					agent := cluster.NewAgent(cluster.AgentDeps{
+						Deps: app.ClusterDeps(),
+						Log:  app.Log, Bus: app.Bus,
+						DataDir: dataDir, PanelAddr: creds.PanelAddr,
+						Token: creds.Token, NodeID: creds.NodeID, NodeName: creds.Name,
+						GRPCPort: cmd.Int("grpc-port"),
+					})
+					fmt.Printf("Servy agent %s — node %s (%s)\n", version.Version, creds.NodeID, creds.Name)
+					fmt.Printf("Node API on :%d | panel %s | servers in %s\n",
+						cmd.Int("grpc-port"), creds.PanelAddr, app.Paths.ServersDir)
+					fmt.Println("Keep this process running: the panel manages its servers through it.")
+					return agent.Run()
+				},
+			},
+			{
+				Name:  "status",
+				Usage: "show this node's registration",
+				Action: func(ctx context.Context, cmd *clipkg.Command) error {
+					_, app, err := loadConfigAndApp(cmd)
+					if err != nil {
+						return err
+					}
+					creds, err := cluster.LoadCredentials(app.Paths.DataDir)
+					if err != nil {
+						return err
+					}
+					if creds == nil {
+						fmt.Println("not joined to a panel")
+						return nil
+					}
+					fmt.Printf("node:    %s\nname:    %s\npanel:   %s\njoined:  %s\n",
+						creds.NodeID, creds.Name, creds.PanelAddr, creds.JoinedAt)
+					return nil
+				},
+			},
+			{
+				Name:  "leave",
+				Usage: "forget the saved panel credentials (re-join needs a new ticket)",
+				Action: func(ctx context.Context, cmd *clipkg.Command) error {
+					_, app, err := loadConfigAndApp(cmd)
+					if err != nil {
+						return err
+					}
+					path := cluster.CredentialsPath(app.Paths.DataDir)
+					if err := os.Remove(path); err != nil {
+						if os.IsNotExist(err) {
+							fmt.Println("nothing to remove (node was never joined)")
+							return nil
+						}
+						return err
+					}
+					fmt.Printf("Removed %s — ask the panel for a new ticket before restarting.\n", path)
+					return nil
+				},
+			},
 		},
 	}
 }
@@ -518,26 +611,60 @@ func gameManifestCommand() *clipkg.Command {
 func nodeCommand() *clipkg.Command {
 	return &clipkg.Command{
 		Name:  "node",
-		Usage: "cluster node utilities",
+		Usage: "cluster node utilities (panel side)",
 		Commands: []*clipkg.Command{
 			{
-				Name:  "hello",
-				Usage: "test connectivity to a peer node",
-				Flags: []clipkg.Flag{
-					&clipkg.StringFlag{Name: "addr", Required: true},
-					&clipkg.StringFlag{Name: "token", Value: ""},
-				},
+				Name:  "list",
+				Usage: "list joined nodes of this panel",
 				Action: func(ctx context.Context, cmd *clipkg.Command) error {
-					c := cluster.NewClient(cmd.String("token"))
-					if err := c.Hello(cmd.String("addr"), "probe", "cli", version.Version, "panel", nil); err != nil {
+					_, app, err := loadConfigAndApp(cmd)
+					if err != nil {
 						return err
 					}
-					fmt.Println("peer accepted hello")
+					rows, err := app.DB.ListNodes()
+					if err != nil {
+						return err
+					}
+					if len(rows) == 0 {
+						fmt.Println("no nodes joined yet — add one from the panel UI (Nodes → Add node)")
+						return nil
+					}
+					fmt.Printf("%-22s %-20s %-18s %-10s %s\n", "NODE ID", "NAME", "ADDRESS", "STATUS", "LAST SEEN")
+					for _, n := range rows {
+						fmt.Printf("%-22s %-20s %-18s %-10s %s\n", n.NodeID, n.Name, n.Address, n.Status, derefStr(n.LastSeen))
+					}
+					return nil
+				},
+			},
+			{
+				Name:  "whoami",
+				Usage: "show the agent credentials stored in this data dir",
+				Action: func(ctx context.Context, cmd *clipkg.Command) error {
+					_, app, err := loadConfigAndApp(cmd)
+					if err != nil {
+						return err
+					}
+					creds, err := cluster.LoadCredentials(app.Paths.DataDir)
+					if err != nil {
+						return err
+					}
+					if creds == nil {
+						fmt.Println("this data dir is not joined to a panel")
+						return nil
+					}
+					fmt.Printf("node %s (%s) → panel %s\n", creds.NodeID, creds.Name, creds.PanelAddr)
 					return nil
 				},
 			},
 		},
 	}
+}
+
+func derefStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // ---------------- helpers ----------------

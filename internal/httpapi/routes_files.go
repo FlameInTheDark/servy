@@ -42,10 +42,6 @@ func (a *App) filesRoute(c fiber.Ctx) error {
         if err != nil {
                 return fail(c, 404, "SERVER_NOT_FOUND")
         }
-        guard, err := files.NewGuard(def.Path)
-        if err != nil {
-                return fail(c, 500, "SERVER_ERROR")
-        }
         rel := strings.TrimPrefix(c.Path(), "/api/v1/servers/"+serverID+"/files")
         rel = strings.TrimPrefix(rel, "/")
         // c.Path() keeps the URL-encoded form (fiber v2 PathOriginal), so a
@@ -56,6 +52,13 @@ func (a *App) filesRoute(c fiber.Ctx) error {
                 rel = dec
         }
         action := c.Query("action")
+        if nodeID := a.nodeIDForServer(serverID); nodeID != "" {
+                return a.remoteFilesRoute(c, nodeID, serverID, rel, action)
+        }
+        guard, err := files.NewGuard(def.Path)
+        if err != nil {
+                return fail(c, 500, "SERVER_ERROR")
+        }
 
         switch c.Method() {
         case "GET":
@@ -209,8 +212,11 @@ func (a *App) filesRouteDir(c fiber.Ctx) error {
         if err != nil {
                 return fail(c, 404, "SERVER_NOT_FOUND")
         }
-        guard, _ := files.NewGuard(def.Path)
         rel := c.Query("path", "")
+        if nodeID := a.nodeIDForServer(serverID); nodeID != "" {
+                return a.remoteFilesDir(c, nodeID, serverID, rel)
+        }
+        guard, _ := files.NewGuard(def.Path)
         entries, err := a.Files.List(guard, rel)
         if err != nil {
                 if err == files.ErrTraversal {

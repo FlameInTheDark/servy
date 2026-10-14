@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"bytes"
 	"io"
 	"net/http"
@@ -234,6 +235,18 @@ func (a *App) deleteBackup(c fiber.Ctx) error {
 		return nil
 	}
 	removeFiles := fiber.Query[bool](c, "files", false)
+	if nodeID := a.nodeIDForServer(b.ServerID); nodeID != "" {
+		if !a.nodeOnline(nodeID) {
+			return fail(c, 502, "NODE_OFFLINE")
+		}
+		if err := a.Cluster.BackupDelete(nodeID, b.ServerID, b.BackupID, removeFiles); err != nil {
+			return failMsg(c, 502, "NODE_ERROR", err.Error())
+		}
+		if err := a.DB.DeleteBackup(b.BackupID); err != nil {
+			return failMsg(c, 500, "SERVER_ERROR", err.Error())
+		}
+		return ok(c, fiber.Map{"deleted": b.BackupID, "node_id": nodeID})
+	}
 	if err := a.Backups.Delete(b.BackupID, removeFiles); err != nil {
 		return failMsg(c, 400, err.Error(), err.Error())
 	}
@@ -250,10 +263,32 @@ func (a *App) runBackup(c fiber.Ctx) error {
 	if p != nil {
 		uid = p.UserID
 	}
+	if nodeID := a.nodeIDForServer(b.ServerID); nodeID != "" {
+		return a.runRemoteBackup(c, nodeID, b)
+	}
 	if err := a.Backups.Run(b.BackupID, uid); err != nil {
 		return failMsg(c, 500, err.Error(), err.Error())
 	}
 	return ok(c, fiber.Map{"backup_id": b.BackupID, "status": "completed"})
+}
+
+// runRemoteBackup executes a backup config on the node that owns the server and
+// mirrors the node's status report back into the panel row.
+func (a *App) runRemoteBackup(c fiber.Ctx, nodeID string, b gen.Backup) error {
+	if !a.nodeOnline(nodeID) {
+		return fail(c, 502, "NODE_OFFLINE")
+	}
+	raw, err := a.Cluster.BackupRun(nodeID, b.ServerID, b.BackupID, b)
+	if err != nil {
+		return failMsg(c, 502, "NODE_ERROR", err.Error())
+	}
+	if len(raw) > 0 {
+		var row gen.Backup
+		if err := json.Unmarshal(raw, &row); err == nil && row.Status != nil {
+			_ = a.DB.SetBackupStatus(row.Status, b.BackupID)
+		}
+	}
+	return ok(c, fiber.Map{"backup_id": b.BackupID, "status": "completed", "node_id": nodeID})
 }
 
 func (a *App) restoreBackup(c fiber.Ctx) error {
@@ -271,6 +306,15 @@ func (a *App) restoreBackup(c fiber.Ctx) error {
 	if p != nil {
 		uid = p.UserID
 	}
+	if nodeID := a.nodeIDForServer(b.ServerID); nodeID != "" {
+		if !a.nodeOnline(nodeID) {
+			return fail(c, 502, "NODE_OFFLINE")
+		}
+		if err := a.Cluster.BackupRestore(nodeID, b.ServerID, b.BackupID, archive); err != nil {
+			return failMsg(c, 502, "NODE_ERROR", err.Error())
+		}
+		return ok(c, fiber.Map{"restored": archive, "node_id": nodeID})
+	}
 	if err := a.Backups.Restore(b.BackupID, path, uid); err != nil {
 		return failMsg(c, 500, err.Error(), err.Error())
 	}
@@ -281,6 +325,16 @@ func (a *App) backupArchives(c fiber.Ctx) error {
 	b, good := a.loadBackup(c, authz.ServerBackup)
 	if !good {
 		return nil
+	}
+	if nodeID := a.nodeIDForServer(b.ServerID); nodeID != "" {
+		if !a.nodeOnline(nodeID) {
+			return fail(c, 502, "NODE_OFFLINE")
+		}
+		raw, err := a.Cluster.BackupFiles(nodeID, b.ServerID, b.BackupID, "")
+		if err != nil {
+			return failMsg(c, 502, "NODE_ERROR", err.Error())
+		}
+		return ok(c, json.RawMessage(raw))
 	}
 	archives, err := a.Backups.Archives(b.BackupID)
 	if err != nil {
@@ -298,6 +352,17 @@ func (a *App) backupDownload(c fiber.Ctx) error {
 	if strings.Contains(name, "..") {
 		return fail(c, 400, "TRAVERSAL DETECTED")
 	}
+	if nodeID := a.nodeIDForServer(b.ServerID); nodeID != "" {
+		if !a.nodeOnline(nodeID) {
+			return fail(c, 502, "NODE_OFFLINE")
+		}
+		data, err := a.Cluster.BackupRead(nodeID, b.ServerID, b.BackupID, name)
+		if err != nil {
+			return failMsg(c, 502, "NODE_ERROR", err.Error())
+		}
+		c.Set("Content-Disposition", "attachment; filename="+name)
+		return c.Send(data)
+	}
 	path := filepath.Join(b.BackupLocation, name)
 	c.Set("Content-Disposition", "attachment; filename="+name)
 	return c.SendFile(path)
@@ -311,6 +376,16 @@ func (a *App) backupArchiveFiles(c fiber.Ctx) error {
 	name := c.Params("name")
 	if strings.Contains(name, "..") {
 		return fail(c, 400, "TRAVERSAL DETECTED")
+	}
+	if nodeID := a.nodeIDForServer(b.ServerID); nodeID != "" {
+		if !a.nodeOnline(nodeID) {
+			return fail(c, 502, "NODE_OFFLINE")
+		}
+		raw, err := a.Cluster.BackupFiles(nodeID, b.ServerID, b.BackupID, name)
+		if err != nil {
+			return failMsg(c, 502, "NODE_ERROR", err.Error())
+		}
+		return ok(c, json.RawMessage(raw))
 	}
 	path := filepath.Join(b.BackupLocation, name)
 	files, err := a.Backups.ListArchiveFiles(path)

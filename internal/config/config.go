@@ -17,10 +17,8 @@ import (
 
 // Config is the complete panel configuration.
 type Config struct {
-        HTTPPort  int    `yaml:"https_port" json:"https_port"`
-        HTTPHost   string `yaml:"http_host" json:"http_host"`
-        BaseURL    string `yaml:"base_url" json:"base_url"`
-        Language   string `yaml:"language" json:"language"`
+        HTTPPort int    `yaml:"https_port" json:"https_port"`
+        HTTPHost string `yaml:"http_host" json:"http_host"`
 
         GRPCEnabled bool `yaml:"grpc_enabled" json:"grpc_enabled"`
         GRPCPort    int  `yaml:"grpc_port" json:"grpc_port"`
@@ -37,29 +35,21 @@ type Config struct {
         MonitoredMounts []string `yaml:"monitored_mounts" json:"monitored_mounts"`
         JavaExtraPaths  []string `yaml:"java_extra_paths" json:"java_extra_paths"`
 
-        EnableOTPSkew        bool `yaml:"enable_otp_skew" json:"enable_otp_skew"`
-        SuperMFA             bool `yaml:"super_mfa" json:"super_mfa"`                             // require TOTP for superusers
-        GeneralUserLogAccess bool `yaml:"general_user_log_access" json:"general_user_log_access"` // non-admins may read panel logs
-        ResetSecretsOnNextBoot bool `yaml:"reset_secrets_on_next_boot" json:"reset_secrets_on_next_boot"`
-        Experimental           bool `yaml:"experimental" json:"experimental"`
-        EnableUserSelfDelete   bool `yaml:"enable_user_self_delete" json:"enable_user_self_delete"`
-        ShowErrors             bool `yaml:"show_errors" json:"show_errors"`
-        ShowContributeLink     bool `yaml:"show_contribute_link" json:"show_contribute_link"`
+        EnableOTPSkew          bool `yaml:"enable_otp_skew" json:"enable_otp_skew"`
+        SuperMFA               bool `yaml:"super_mfa" json:"super_mfa"`                             // require TOTP for superusers
+        GeneralUserLogAccess   bool `yaml:"general_user_log_access" json:"general_user_log_access"` // non-admins may read panel logs
+        ResetSecretsOnNextBoot bool `yaml:"reset_secrets_on_next_boot" json:"reset_secrets_on_next_boot"` // one-shot: cleared after the secrets are rotated
 
+        // Upload limit for the admin image API (<data>/config/uploads).
         MaxImageUploadSizeMB int `yaml:"max_image_upload_size_mb" json:"max_image_upload_size_mb"`
 
-        BigBucketRepo   string `yaml:"big_bucket_repo" json:"big_bucket_repo"`     // server download manifest source
-        DockerSteamImage string `yaml:"docker_steam_image" json:"docker_steam_image"` // image used to run Windows-only Steam games
-        ClusterToken     string `yaml:"cluster_token" json:"cluster_token"`         // shared token for panel/agent pairing
+        BigBucketRepo    string `yaml:"big_bucket_repo" json:"big_bucket_repo"`         // server download manifest source
+        DockerSteamImage string `yaml:"docker_steam_image" json:"docker_steam_image"`   // image used to run SteamCMD jobs
 
-        VirtualTerminalLines int            `yaml:"virtual_terminal_lines" json:"virtual_terminal_lines"` // console scrollback buffer
-        Keywords            []string      `yaml:"terminal_keywords" json:"terminal_keywords"`           // console keyword highlighting
-        SamplingTiers       []SamplingTier `yaml:"sampling_tiers" json:"sampling_tiers"`
-        SamplingFallbackDivisor int       `yaml:"sampling_fallback_divisor" json:"sampling_fallback_divisor"`
-
-        DisabledLanguageFiles []string `yaml:"disabled_language_files" json:"disabled_language_files"`
-
-        AllowNSFWProfilePictures bool `yaml:"allow_nsfw_profile_pictures" json:"allow_nsfw_profile_pictures"`
+        VirtualTerminalLines    int            `yaml:"virtual_terminal_lines" json:"virtual_terminal_lines"` // console scrollback buffer
+        Keywords                []string       `yaml:"terminal_keywords" json:"terminal_keywords"`           // console keyword highlighting
+        SamplingTiers           []SamplingTier `yaml:"sampling_tiers" json:"sampling_tiers"`
+        SamplingFallbackDivisor int            `yaml:"sampling_fallback_divisor" json:"sampling_fallback_divisor"`
 }
 
 // SamplingTier controls history downsampling for a max window.
@@ -68,29 +58,30 @@ type SamplingTier struct {
         SampleRate int `yaml:"sample_rate" json:"sample_rate"` // keep every Nth point
 }
 
-// Categories groups config keys for the admin UI (GET /panel/config).
+// Categories groups config keys for the admin UI (GET /panel/config). Only the
+// keys listed here are exposed to the settings page — everything else stays a
+// file/CLI-only knob. Keys are ordered the way the groups are meant to read.
 var Categories = map[string][]string{
         "general": {
-                "https_port", "http_host", "base_url", "language", "show_errors", "show_contribute_link",
-                "enable_user_self_delete", "experimental", "max_image_upload_size_mb",
-                "allow_nsfw_profile_pictures", "disabled_language_files",
+                "http_host", "https_port",
         },
         "security": {
-                "cookie_expire", "max_login_attempts", "enable_otp_skew", "super_mfa",
+                "max_login_attempts", "cookie_expire", "enable_otp_skew", "super_mfa",
                 "reset_secrets_on_next_boot",
         },
         "logs": {
-                "max_log_lines", "panel_logs_delete_after_days", "virtual_terminal_lines", "terminal_keywords",
+                "max_log_lines", "virtual_terminal_lines", "terminal_keywords",
+                "panel_logs_delete_after_days", "general_user_log_access",
         },
         "monitoring": {
-                "stats_update_frequency_seconds", "history_max_age", "sampling_tiers",
-                "sampling_fallback_divisor", "dir_size_poll_freq_minutes", "monitored_mounts",
+                "stats_update_frequency_seconds", "history_max_age", "dir_size_poll_freq_minutes",
+                "monitored_mounts", "sampling_fallback_divisor", "sampling_tiers",
         },
-        "miscellaneous": {
-                "java_extra_paths", "big_bucket_repo", "docker_steam_image", "general_user_log_access",
+        "servers": {
+                "big_bucket_repo", "java_extra_paths", "docker_steam_image",
         },
-        "server": {
-                "cluster_token",
+        "cluster": {
+                "grpc_enabled", "grpc_port",
         },
 }
 
@@ -98,9 +89,7 @@ var Categories = map[string][]string{
 func Default() *Config {
         return &Config{
                 HTTPPort: 8443,
-                HTTPHost:  "0.0.0.0",
-                BaseURL:    "http://localhost:8443",
-                Language:   "en",
+                HTTPHost: "0.0.0.0",
 
                 GRPCEnabled: false,
                 GRPCPort:    5055,
@@ -111,29 +100,25 @@ func Default() *Config {
                 StatsUpdateFrequencySeconds: 10,
                 HistoryMaxAge:               7,
                 MaxLogLines:                 1000,
-                DirSizePollFreqMinutes:       5,
+                DirSizePollFreqMinutes:      5,
 
                 MonitoredMounts: []string{"/"},
                 JavaExtraPaths:  []string{},
 
                 EnableOTPSkew:        true,
-                ShowErrors:           true,
-                ShowContributeLink:   true,
                 MaxImageUploadSizeMB: 5,
 
-                BigBucketRepo:   "https://jars.arcadiatech.org",
+                BigBucketRepo:    "https://jars.arcadiatech.org",
                 DockerSteamImage: "steamcmd/steamcmd:latest",
 
                 VirtualTerminalLines: 200,
-                Keywords:            []string{"ERROR", "WARN", "FATAL", "SEVERE"},
+                Keywords:             []string{"ERROR", "WARN", "FATAL", "SEVERE"},
                 SamplingTiers: []SamplingTier{
                         {MaxHours: 6, SampleRate: 1},
                         {MaxHours: 24, SampleRate: 2},
                         {MaxHours: 72, SampleRate: 6},
                 },
                 SamplingFallbackDivisor: 12,
-
-                DisabledLanguageFiles: []string{},
         }
 }
 
@@ -289,17 +274,11 @@ func (c *Config) sanitize() error {
         if c.MaxImageUploadSizeMB <= 0 {
                 c.MaxImageUploadSizeMB = 5
         }
-        if c.Language == "" {
-                c.Language = "en"
-        }
         if c.BigBucketRepo == "" {
                 c.BigBucketRepo = "https://jars.arcadiatech.org"
         }
         if c.DockerSteamImage == "" {
                 c.DockerSteamImage = "steamcmd/steamcmd:latest"
-        }
-        if c.DisabledLanguageFiles == nil {
-                c.DisabledLanguageFiles = []string{}
         }
         if c.JavaExtraPaths == nil {
                 c.JavaExtraPaths = []string{}

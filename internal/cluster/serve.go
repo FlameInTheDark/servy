@@ -17,6 +17,6 @@ func ServeGRPC(svc *Service, addr string) error {
 	}
 	server := grpc.NewServer()
 	pb.RegisterNodeServiceServer(server, svc)
-	fmt.Printf("cluster gRPC listening on %s\n", addr)
+	fmt.Printf("node API listening on %s (agents join with a ticket from the panel UI)\n", addr)
 	return server.Serve(lis)
 }

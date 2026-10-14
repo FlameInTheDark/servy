@@ -4,9 +4,13 @@ const BASE = "/api/v1";
 
 export class APIError extends Error {
   code: string;
-  constructor(code: string, message: string) {
+  /** Full error envelope — carries extra fields some endpoints return
+   *  (e.g. the server names that block removing a cluster node). */
+  payload: any;
+  constructor(code: string, message: string, payload?: any) {
     super(message);
     this.code = code;
+    this.payload = payload;
   }
 }
 
@@ -49,7 +53,7 @@ export async function api<T = any>(
     throw new APIError("SERVER_ERROR", `HTTP ${res.status}`);
   }
   if (!res.ok || json.status === "error") {
-    throw new APIError(json.error || `HTTP_${res.status}`, json.error_data || json.error || "request failed");
+    throw new APIError(json.error || `HTTP_${res.status}`, json.error_data || json.error || "request failed", json);
   }
   return json.data as T;
 }

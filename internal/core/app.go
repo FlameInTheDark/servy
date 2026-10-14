@@ -3,6 +3,7 @@
 package core
 
 import (
+        "encoding/json"
         "fmt"
         "os"
         "path/filepath"
@@ -27,6 +28,7 @@ import (
         "github.com/FlameInTheDark/servy/internal/scheduler"
         "github.com/FlameInTheDark/servy/internal/servers"
         "github.com/FlameInTheDark/servy/internal/steamcmd"
+        "github.com/FlameInTheDark/servy/internal/version"
         "github.com/FlameInTheDark/servy/internal/webhooks"
 )
 
@@ -92,6 +94,8 @@ type App struct {
         Metrics   *metrics.Collector
         HostStats *servers.HostStats
         Cluster   *cluster.Client
+        Nodes     *cluster.NodeRegistry
+        Tickets   *cluster.TicketStore
         Bucket    *bigbucket.Client
         Steam     *steamcmd.Manager
         SteamCatalog *steamcmd.Catalog
@@ -140,11 +144,17 @@ func New(cfg *config.Manager, opts Options) (*App, error) {
 
         // panel_settings bootstrap (cookie secret for JWT signing)
         st, err := q.GetSettings()
-        if err != nil || st.CookieSecret == nil || *st.CookieSecret == "" || cfg.Get().ResetSecretsOnNextBoot {
+        rotateSecrets := cfg.Get().ResetSecretsOnNextBoot
+        if err != nil || st.CookieSecret == nil || *st.CookieSecret == "" || rotateSecrets {
                 secret := auth.RandomToken(32)
                 apiKey := auth.RandomToken(32)
                 q.UpsertSettings(&apiKey, &secret, nil, 1.0, nil, nil, 0, nil, nil, nil, nil, nil)
                 st, _ = q.GetSettings()
+                if rotateSecrets {
+                        // rotation is a one-shot request: clear it so the next boot keeps
+                        // the freshly generated secrets instead of signing everyone out again.
+                        _ = cfg.Patch(map[string]interface{}{"reset_secrets_on_next_boot": false})
+                }
         }
         secretFn := func() string {
                 if st, err := q.GetSettings(); err == nil && st.CookieSecret != nil {
@@ -185,7 +195,73 @@ func New(cfg *config.Manager, opts Options) (*App, error) {
         steam.SetDocker(dockerMgr, cfg.Get().DockerSteamImage)
         creationSvc := creation.New(q, log, bus, registry, bucket, steam, catalog, backupSvc, paths.ServersDir, paths.ImportDir)
 
+        nodes := cluster.NewNodeRegistry()
+        if rows, err := q.ListNodes(); err == nil {
+                nodes.Load(rows)
+        }
+        // persist online/offline transitions so the node list survives restarts
+        nodes.OnStatus = func(nodeID, status, version string, lastSeen time.Time) {
+                ts := lastSeen.UTC().Format(time.RFC3339)
+                var ver *string
+                if version != "" {
+                        ver = &version
+                }
+                if err := q.UpdateNodeStatus(status, &ts, ver, nodeID); err != nil {
+                        log.Get("server").Warning("cluster: could not persist node %s status: %v", nodeID, err)
+                }
+        }
+        tickets := cluster.NewTicketStore()
+        clusterClient := cluster.NewClient(nodes, log)
+
+        // Schedules and webhooks run on the panel even for remote servers:
+        // clusterClient routes each action to the owning node.
+        routeRemote := func(serverID string, fn func(nodeID string) error) (bool, error) {
+                def, err := q.GetServer(serverID)
+                if err != nil || def.NodeID == nil {
+                        return false, nil
+                }
+                nodeID := *def.NodeID
+                if nodeID == "" || nodeID == servers.LocalNodeID {
+                        return false, nil
+                }
+                return true, fn(nodeID)
+        }
+
         executor := func(serverID, action, actionID, command string, userID int64) error {
+                if action == "backup" {
+                        bid := actionID
+                        if bid == "" {
+                                if b, err := backupSvc.DefaultBackup(serverID); err == nil {
+                                        bid = b.BackupID
+                                }
+                        }
+                        if bid == "" {
+                                return fmt.Errorf("no backup config for server")
+                        }
+                        if remote, err := routeRemote(serverID, func(nodeID string) error {
+                                return runRemoteBackup(clusterClient, q, nodeID, serverID, bid)
+                        }); remote {
+                                return err
+                        }
+                        return backupSvc.Run(bid, userID)
+                }
+                if remote, err := routeRemote(serverID, func(nodeID string) error {
+                        switch action {
+                        case "start":
+                                return clusterClient.StartServer(nodeID, serverID)
+                        case "stop":
+                                return clusterClient.StopServer(nodeID, serverID)
+                        case "restart":
+                                return clusterClient.RestartServer(nodeID, serverID)
+                        case "kill":
+                                return clusterClient.KillServer(nodeID, serverID)
+                        case "command":
+                                return clusterClient.SendCommand(nodeID, serverID, command)
+                        }
+                        return fmt.Errorf("unknown schedule action %q", action)
+                }); remote {
+                        return err
+                }
                 sup, err := registry.Get(serverID)
                 if err != nil {
                         return err
@@ -199,36 +275,24 @@ func New(cfg *config.Manager, opts Options) (*App, error) {
                         return sup.Restart(userID, nil)
                 case "kill":
                         return sup.Kill(userID)
-                case "backup":
-                        bid := actionID
-                        if bid == "" {
-                                if b, err := backupSvc.DefaultBackup(serverID); err == nil {
-                                        bid = b.BackupID
-                                }
-                        }
-                        if bid == "" {
-                                return fmt.Errorf("no backup config for server")
-                        }
-                        return backupSvc.Run(bid, userID)
                 case "command":
                         return sup.SendCommand(command, userID)
                 }
                 return fmt.Errorf("unknown schedule action %q", action)
         }
+        updater := servers.NewUpdateManager(deps, registry)
         engine := scheduler.New(q, log, cfg, bus, executor)
         hookSvc := webhooks.New(q, log, bus)
         hub := realtime.NewHub(authSvc, log, bus)
         collector := metrics.New()
         hostStats := servers.NewHostStats(deps)
-        clusterClient := cluster.NewClient(cfg.Get().ClusterToken)
-        updater := servers.NewUpdateManager(deps, registry)
 
         a := &App{
                 Cfg: cfg, Log: log, DB: q, Bus: bus, Auth: authSvc, Registry: registry,
                 Files: filesSvc, Uploads: uploads, Backups: backupSvc, Creation: creationSvc,
                 Scheduler: engine, Webhooks: hookSvc, Realtime: hub, Metrics: collector,
                 HostStats: hostStats, Cluster: clusterClient, Bucket: bucket, Steam: steam,
-                SteamCatalog: catalog,
+                SteamCatalog: catalog, Nodes: nodes, Tickets: tickets,
                 Updater: updater, Paths: paths, Secret: secretFn, Docker: dockerMgr,
         }
 
@@ -236,7 +300,8 @@ func New(cfg *config.Manager, opts Options) (*App, error) {
                 Cfg: cfg, Log: log, DB: q, Bus: bus, Auth: authSvc, Registry: registry,
                 Files: filesSvc, Uploads: uploads, Backups: backupSvc, Creation: creationSvc,
                 Scheduler: engine, Realtime: hub, Metrics: collector, HostStats: hostStats,
-                Cluster: clusterClient, Bucket: bucket, Steam: steam, SteamCatalog: catalog, Updater: updater,
+                Cluster: clusterClient, Nodes: nodes, Tickets: tickets,
+                Bucket: bucket, Steam: steam, SteamCatalog: catalog, Updater: updater,
                 ImportDir: paths.ImportDir, ServersRoot: paths.ServersDir,
                 BackupRoot: paths.BackupsDir, DataDir: paths.DataDir, Docker: dockerMgr,
         }
@@ -254,6 +319,10 @@ func (a *App) Start() error {
         a.stopFns = append(a.stopFns, a.Scheduler.Stop)
         a.Webhooks.Start()
         a.stopFns = append(a.stopFns, a.Webhooks.Stop)
+
+        // cluster: keep node liveness + server statuses fresh
+        a.Cluster.Start()
+        a.stopFns = append(a.stopFns, a.Cluster.Close)
 
         // metrics feed: subscribe to server stats events
         ch, cancel := a.Bus.Subscribe("*")
@@ -301,12 +370,48 @@ func (a *App) Stop() {
         }
 }
 
-// StartGRPC launches the cluster gRPC server (panel or agent role).
+// StartGRPC launches the panel-side node API (join tickets + membership).
 func (a *App) StartGRPC(addr string) error {
-        svc := cluster.NewService(servers.Deps{DB: a.DB, Bus: a.Bus, Log: a.Log, Cfg: a.Cfg, Docker: a.Docker, Catalog: a.SteamCatalog}, a.Registry, a.Cfg.Get().ClusterToken, a.Log, a.Bus)
+        svc := cluster.NewPanelService(a.clusterDeps(), a.Nodes, a.Tickets)
         a.grpcServer = svc
         return cluster.ServeGRPC(svc, addr)
 }
+
+// runRemoteBackup executes a backup config on the node owning the server and
+// mirrors the status the node reported back into the panel's backup row.
+func runRemoteBackup(client *cluster.Client, q *database.Queries, nodeID, serverID, backupID string) error {
+        b, err := q.GetBackup(backupID)
+        if err != nil {
+                return err
+        }
+        raw, err := client.BackupRun(nodeID, serverID, backupID, b)
+        if err != nil {
+                return err
+        }
+        if len(raw) > 0 {
+                var view struct {
+                        Status *string `json:"status"`
+                }
+                if err := json.Unmarshal(raw, &view); err == nil && view.Status != nil {
+                        _ = q.SetBackupStatus(view.Status, backupID)
+                }
+        }
+        return nil
+}
+
+// clusterDeps describes what a node can execute for the panel.
+func (a *App) clusterDeps() cluster.Deps {
+        return cluster.Deps{
+                DB: a.DB, Log: a.Log, Bus: a.Bus, Registry: a.Registry,
+                Creation: a.Creation, Backups: a.Backups, Files: a.Files, HostStats: a.HostStats,
+                DataDir: a.Paths.DataDir, ServersRoot: a.Paths.ServersDir,
+                ImportsDir: a.Paths.ImportDir, BackupsRoot: a.Paths.BackupsDir,
+                Version: version.Version,
+        }
+}
+
+// ClusterDeps exposes the node capabilities for the agent runtime.
+func (a *App) ClusterDeps() cluster.Deps { return a.clusterDeps() }
 
 // modelsServerRuntime aliases the runtime type (wiring convenience).
 type modelsServerRuntime = models.ServerRuntime

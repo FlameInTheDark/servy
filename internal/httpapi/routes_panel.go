@@ -15,11 +15,13 @@ import (
 	"github.com/gofiber/fiber/v3"
 
 	"github.com/FlameInTheDark/servy/internal/authz"
+	"github.com/FlameInTheDark/servy/internal/cluster"
 	"github.com/FlameInTheDark/servy/internal/config"
 	"github.com/FlameInTheDark/servy/internal/configedit"
 	"github.com/FlameInTheDark/servy/internal/creation"
 	"github.com/FlameInTheDark/servy/internal/events"
 	"github.com/FlameInTheDark/servy/internal/files"
+	"github.com/FlameInTheDark/servy/internal/models"
 	"github.com/FlameInTheDark/servy/internal/repo/gen"
 	"github.com/FlameInTheDark/servy/internal/safehttp"
 	"github.com/FlameInTheDark/servy/internal/servers"
@@ -34,13 +36,6 @@ func (a *App) mountPanel(api fiber.Router) {
 	g.Get("/stats", a.panelHostStats)
 	g.Get("/config", a.getPanelConfig)
 	g.Patch("/config", a.patchPanelConfig)
-	g.Post("/config/customize", a.customizeBranding)
-	g.Patch("/config/embed", a.patchEmbed)
-	g.Delete("/config/embed", a.deleteEmbed)
-	g.Patch("/config/logos", a.patchLogos)
-	g.Delete("/config/logos", a.deleteLogos)
-	g.Get("/config/servers_dir", a.getServersDir)
-	g.Patch("/config/servers_dir", a.setServersDir)
 	g.Get("/logs/:type", a.panelLogs)
 	g.Get("/support_logs", a.supportLogs)
 	g.Get("/support_logs/status", a.supportLogsStatus)
@@ -74,10 +69,13 @@ func (a *App) mountPanel(api fiber.Router) {
 	api.Patch("/webhook/:webhook_id", a.patchWebhook)
 	api.Delete("/webhook/:webhook_id", a.deleteWebhook)
 
-	// cluster nodes
+	// cluster nodes: join tickets + membership
 	g.Get("/nodes", a.listNodes)
-	g.Post("/nodes", a.addNode)
+	g.Get("/nodes/tickets", a.listNodeTickets)
+	g.Post("/nodes/tickets", a.createNodeTicket)
+	g.Delete("/nodes/tickets/:hash", a.revokeNodeTicket)
 	g.Get("/nodes/:node_id", a.getNode)
+	g.Post("/nodes/:node_id/ping", a.pingNode)
 	g.Delete("/nodes/:node_id", a.deleteNode)
 
 	// manifests (URL-importable server definitions)
@@ -191,7 +189,7 @@ func (a *App) panelHostStats(c fiber.Ctx) error {
 		"cpu_usage": snap.CPUUsage, "running_servers": running, "total_servers": total})
 }
 
-// getPanelConfig returns the categorized config + branding.
+// getPanelConfig returns the categorized config shown on the panel settings page.
 func (a *App) getPanelConfig(c fiber.Ctx) error {
 	if a.requireAuth(c) == nil {
 		return nil
@@ -210,19 +208,7 @@ func (a *App) getPanelConfig(c fiber.Ctx) error {
 		}
 		categories[cat] = entries
 	}
-	st, _ := a.Auth.GetSettings()
-	branding := map[string]interface{}{
-		"login_photo":   deref(st.LoginPhoto),
-		"login_opacity": st.LoginOpacity,
-		"logo_full":     deref(st.LogoFull),
-		"logo_square":   deref(st.LogoSquare),
-	}
-	embed := map[string]interface{}{
-		"og_enabled": st.OgEnabled == 1, "og_title": deref(st.OgTitle),
-		"og_description": deref(st.OgDescription), "og_image": deref(st.OgImage),
-		"og_color": deref(st.OgColor),
-	}
-	return ok(c, fiber.Map{"categories": categories, "branding": branding, "embed": embed})
+	return ok(c, fiber.Map{"categories": categories})
 }
 
 func (a *App) patchPanelConfig(c fiber.Ctx) error {
@@ -239,121 +225,6 @@ func (a *App) patchPanelConfig(c fiber.Ctx) error {
 	a.Bus.PublishSimple("panel_config_update", map[string]interface{}{"updated": true})
 	a.Log.Audit("api", 0, "", c.IP(), "Updated panel config")
 	return ok(c, fiber.Map{"updated": true})
-}
-
-func (a *App) customizeBranding(c fiber.Ctx) error {
-	if a.requireSuperuser(c) == nil {
-		return nil
-	}
-	var req struct {
-		LoginPhoto   *string  `json:"login_photo,omitempty"`
-		LoginOpacity *float64 `json:"login_opacity,omitempty"`
-		LogoFull     *string  `json:"logo_full,omitempty"`
-		LogoSquare   *string  `json:"logo_square,omitempty"`
-	}
-	if err := parseBody(c, &req); err != nil {
-		return err
-	}
-	st, _ := a.Auth.GetSettings()
-	photo := st.LoginPhoto
-	opacity := st.LoginOpacity
-	full := st.LogoFull
-	square := st.LogoSquare
-	if req.LoginPhoto != nil {
-		photo = req.LoginPhoto
-	}
-	if req.LoginOpacity != nil {
-		opacity = *req.LoginOpacity
-	}
-	if req.LogoFull != nil {
-		full = req.LogoFull
-	}
-	if req.LogoSquare != nil {
-		square = req.LogoSquare
-	}
-	a.DB.UpdateBranding(photo, opacity, full, square)
-	return ok(c, fiber.Map{"updated": true})
-}
-
-func (a *App) patchEmbed(c fiber.Ctx) error {
-	if a.requireSuperuser(c) == nil {
-		return nil
-	}
-	var req struct {
-		Enabled *bool   `json:"og_enabled,omitempty"`
-		Title   *string `json:"og_title,omitempty"`
-		Desc    *string `json:"og_description,omitempty"`
-		Image   *string `json:"og_image,omitempty"`
-		Color   *string `json:"og_color,omitempty"`
-	}
-	if err := parseBody(c, &req); err != nil {
-		return err
-	}
-	st, _ := a.Auth.GetSettings()
-	enabled := st.OgEnabled
-	title, desc, image, color := st.OgTitle, st.OgDescription, st.OgImage, st.OgColor
-	if req.Enabled != nil {
-		enabled = bool2i(*req.Enabled)
-	}
-	if req.Title != nil {
-		title = req.Title
-	}
-	if req.Desc != nil {
-		desc = req.Desc
-	}
-	if req.Image != nil {
-		image = req.Image
-	}
-	if req.Color != nil {
-		color = req.Color
-	}
-	a.DB.UpdateEmbed(enabled, title, desc, image, color)
-	return ok(c, fiber.Map{"updated": true})
-}
-
-func (a *App) deleteEmbed(c fiber.Ctx) error {
-	if a.requireSuperuser(c) == nil {
-		return nil
-	}
-	var zero *string
-	a.DB.UpdateEmbed(0, zero, zero, zero, zero)
-	return ok(c, fiber.Map{"deleted": true})
-}
-
-func (a *App) patchLogos(c fiber.Ctx) error { return a.customizeBranding(c) }
-
-func (a *App) deleteLogos(c fiber.Ctx) error {
-	if a.requireSuperuser(c) == nil {
-		return nil
-	}
-	var zero *string
-	a.DB.UpdateBranding(zero, 1.0, zero, zero)
-	return ok(c, fiber.Map{"deleted": true})
-}
-
-func (a *App) getServersDir(c fiber.Ctx) error {
-	if a.requireSuperuser(c) == nil {
-		return nil
-	}
-	return ok(c, fiber.Map{"servers_dir": a.ServersRoot})
-}
-
-func (a *App) setServersDir(c fiber.Ctx) error {
-	if a.requireSuperuser(c) == nil {
-		return nil
-	}
-	var req struct {
-		Dir string `json:"dir"`
-	}
-	if err := parseBody(c, &req); err != nil {
-		return err
-	}
-	abs, err := filepath.Abs(req.Dir)
-	if err != nil || !strings.HasPrefix(abs, a.DataDir) {
-		return failMsg(c, 400, "INVALID_DIR", "directory must be inside the data dir")
-	}
-	a.DB.SetMasterServerDir(&abs)
-	return ok(c, fiber.Map{"servers_dir": abs})
 }
 
 func (a *App) panelLogs(c fiber.Ctx) error {
@@ -801,83 +672,262 @@ func (a *App) deleteWebhook(c fiber.Ctx) error {
 
 // ---------------- cluster nodes ----------------
 
+// splitCSV splits a comma separated capability list.
+func splitCSV(s string) []string {
+	out := []string{}
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// nodeAddress resolves what agents should dial for the panel's own node API.
+func (a *App) nodeAddress() string {
+	c := a.Cfg.Get()
+	host := c.HTTPHost
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		if h, err := os.Hostname(); err == nil {
+			host = h
+		}
+	}
+	return fmt.Sprintf("%s:%d", host, c.GRPCPort)
+}
+
+// nodeView builds the API row of one node (live state + durable columns).
+func (a *App) nodeViewFromState(st cluster.NodeState) map[string]interface{} {
+	running, total := a.Nodes.Counts(st.NodeID)
+	if total == 0 && st.Total > 0 {
+		running, total = st.Running, st.Total
+	}
+	view := map[string]interface{}{
+		"node_id": st.NodeID, "name": st.Name, "address": st.Address, "role": st.Role,
+		"status": st.Status, "online": st.Online(), "version": st.Version,
+		"capabilities": st.Capabilities, "cpu": st.CPU, "mem_percent": st.MemPct,
+		"mem_used": st.MemUsed, "mem_total": st.MemTotal,
+		"servers_running": running, "servers_total": total,
+		"last_seen": st.LastSeen.UTC().Format(time.RFC3339), "created": st.Created.UTC().Format(time.RFC3339),
+		"last_error": st.LastError, "local": false,
+	}
+	return view
+}
+
 func (a *App) listNodes(c fiber.Ctx) error {
 	if a.requireSuperuser(c) == nil {
 		return nil
 	}
-	rows, _ := a.DB.ListNodes()
 	out := []map[string]interface{}{}
-	for _, n := range rows {
+	// this panel is itself a node that can host servers
+	snap := a.HostStats.Snapshot()
+	local := map[string]interface{}{
+		"node_id": servers.LocalNodeID, "name": "This panel", "address": a.nodeAddress(),
+		"role": "panel", "status": "online", "online": true, "version": version.Version,
+		"cpu": snap.CPUUsage, "mem_percent": snap.MemPercent, "mem_used": snap.MemUsage,
+		"mem_total": snap.MemTotal, "capabilities": []string{"servers", "files", "terminal", "backups", "creation"},
+		"local": true,
+	}
+	running, total := 0, 0
+	for _, sup := range a.Registry.All() {
+		total++
+		if sup.State() == models.StateRunning || sup.State() == models.StateStarting {
+			running++
+		}
+	}
+	local["servers_running"], local["servers_total"] = running, total
+	out = append(out, local)
+
+	for _, st := range a.Nodes.Snapshot() {
+		out = append(out, a.nodeViewFromState(st))
+	}
+	// durable rows that never finished joining (ticket issued, agent absent)
+	for _, row := range a.listNodeRows() {
+		if _, ok := a.Nodes.Get(row.NodeID); ok {
+			continue
+		}
 		out = append(out, map[string]interface{}{
-			"node_id": n.NodeID, "name": n.Name, "address": n.Address, "role": n.Role,
-			"status": n.Status, "last_seen": deref(n.LastSeen), "version": deref(n.Version),
-			"created": n.Created,
+			"node_id": row.NodeID, "name": row.Name, "address": row.Address, "role": row.Role,
+			"status": "offline", "online": false, "version": deref(row.Version),
+			"capabilities": splitCSV(deref(row.Capabilities)), "cpu": 0, "mem_percent": 0,
+			"mem_used": 0, "mem_total": 0, "servers_running": 0, "servers_total": 0,
+			"last_seen": deref(row.LastSeen), "created": row.Created, "last_error": "", "local": false,
 		})
 	}
-	return ok(c, out)
+	// cluster enablement hint for the UI
+	enabled := a.Cfg.Get().GRPCEnabled
+	return ok(c, fiber.Map{"nodes": out, "tickets": a.pendingTickets(), "cluster_enabled": enabled,
+		"panel_address": a.nodeAddress()})
 }
 
-func (a *App) addNode(c fiber.Ctx) error {
-	if a.requireSuperuser(c) == nil {
+func (a *App) listNodeRows() []gen.Node {
+	rows, err := a.DB.ListNodes()
+	if err != nil {
+		return nil
+	}
+	return rows
+}
+
+func (a *App) pendingTickets() []map[string]interface{} {
+	out := []map[string]interface{}{}
+	if a.Tickets == nil {
+		return out
+	}
+	for _, t := range a.Tickets.Pending() {
+		out = append(out, map[string]interface{}{
+			"note": t.Note, "created": t.Created.UTC().Format(time.RFC3339),
+			"expires": t.Expires.UTC().Format(time.RFC3339), "expires_in": int(time.Until(t.Expires).Seconds()),
+		})
+	}
+	return out
+}
+
+// createNodeTicket issues a one-shot join ticket the agent redeems.
+func (a *App) createNodeTicket(c fiber.Ctx) error {
+	p := a.requireSuperuser(c)
+	if p == nil {
 		return nil
 	}
 	var req struct {
-		Name    string `json:"name"`
-		Address string `json:"address"` // host:port of the agent's gRPC server
-		Token   string `json:"token"`
+		Note string `json:"note"`
 	}
-	if err := parseBody(c, &req); err != nil {
-		return err
+	if len(c.Body()) > 0 {
+		_ = json.Unmarshal(c.Body(), &req)
 	}
-	if req.Name == "" || req.Address == "" {
-		return failMsg(c, 400, "INVALID_JSON_SCHEMA", "name and address required")
+	ticket, expires := a.Tickets.Issue(req.Note)
+	address := a.nodeAddress()
+	cmdline := fmt.Sprintf("servy agent run --panel %s --ticket %s", address, ticket)
+	a.Log.Audit(p.Username, p.UserID, "", c.IP(), "Issued node join ticket")
+	return ok(c, fiber.Map{
+		"ticket": ticket, "expires": expires.UTC().Format(time.RFC3339),
+		"expires_in": int(time.Until(expires).Seconds()), "panel_address": address, "command": cmdline,
+	})
+}
+
+func (a *App) listNodeTickets(c fiber.Ctx) error {
+	if a.requireSuperuser(c) == nil {
+		return nil
 	}
-	nodeID := "node-" + newUUID()[:8]
-	tokenHash := ""
-	if req.Token != "" {
-		tokenHash = req.Token // stored for panel→agent dialing reference (documented)
+	return ok(c, a.pendingTickets())
+}
+
+func (a *App) revokeNodeTicket(c fiber.Ctx) error {
+	if a.requireSuperuser(c) == nil {
+		return nil
 	}
-	now := databaseNow()
-	if err := a.DB.UpsertNode(nodeID, req.Name, req.Address, "agent", "registered", &now, &version.Version, nil, &tokenHash, now); err != nil {
-		return failMsg(c, 400, err.Error(), err.Error())
-	}
-	// say hello
-	if err := a.Cluster.Hello(req.Address, nodeID, req.Name, version.Version, "panel", nil); err != nil {
-		return ok(c, fiber.Map{"node_id": nodeID, "registered": true, "hello": err.Error()})
-	}
-	a.DB.UpdateNodeStatus("online", &now, &version.Version, nodeID)
-	return ok(c, fiber.Map{"node_id": nodeID, "registered": true, "hello": "ok"})
+	a.Tickets.Revoke(c.Params("hash"))
+	return ok(c, fiber.Map{"revoked": true})
 }
 
 func (a *App) getNode(c fiber.Ctx) error {
 	if a.requireSuperuser(c) == nil {
 		return nil
 	}
-	n, err := a.DB.GetNode(c.Params("node_id"))
+	nodeID := c.Params("node_id")
+	serversOn := []map[string]interface{}{}
+	var nodeIDPtr *string
+	if nodeID != servers.LocalNodeID {
+		nodeIDPtr = &nodeID
+	}
+	serversRows, _ := a.DB.ListServersByNode(nodeIDPtr)
+	for _, def := range serversRows {
+		rt := a.remoteRuntime(def.ServerID)
+		item := map[string]interface{}{"server_id": def.ServerID, "server_name": def.ServerName, "type": def.Type}
+		if rt != nil {
+			item["state"] = string(rt.State)
+			item["running"] = rt.Running
+			item["online"] = rt.Online
+		} else {
+			item["state"] = string(models.StateStopped)
+			item["running"] = false
+		}
+		serversOn = append(serversOn, item)
+	}
+
+	if nodeID == servers.LocalNodeID {
+		return ok(c, fiber.Map{
+			"node_id": servers.LocalNodeID, "name": "This panel", "address": a.nodeAddress(),
+			"role": "panel", "status": "online", "online": true, "version": version.Version,
+			"local": true, "servers": serversOn,
+		})
+	}
+	if st, found := a.Nodes.Get(nodeID); found {
+		view := a.nodeViewFromState(st)
+		view["servers"] = serversOn
+		return ok(c, view)
+	}
+	row, err := a.DB.GetNode(nodeID)
 	if err != nil {
 		return fail(c, 404, "NOT_FOUND")
 	}
-	serversOn := []map[string]interface{}{}
-	nodeIDP := n.NodeID
-	serversRows, _ := a.DB.ListServersByNode(&nodeIDP)
-	for _, def := range serversRows {
-		serversOn = append(serversOn, map[string]interface{}{"server_id": def.ServerID, "server_name": def.ServerName})
-	}
 	return ok(c, fiber.Map{
-		"node_id": n.NodeID, "name": n.Name, "address": n.Address, "role": n.Role,
-		"status": n.Status, "last_seen": deref(n.LastSeen), "version": deref(n.Version),
-		"servers": serversOn,
+		"node_id": row.NodeID, "name": row.Name, "address": row.Address, "role": row.Role,
+		"status": "offline", "online": false, "version": deref(row.Version),
+		"last_seen": deref(row.LastSeen), "created": row.Created, "servers": serversOn,
 	})
 }
 
-func (a *App) deleteNode(c fiber.Ctx) error {
+// pingNode re-checks a node right now (used by the UI's "check" button).
+func (a *App) pingNode(c fiber.Ctx) error {
 	if a.requireSuperuser(c) == nil {
 		return nil
 	}
-	if err := a.DB.DeleteNode(c.Params("node_id")); err != nil {
+	nodeID := c.Params("node_id")
+	if nodeID == servers.LocalNodeID {
+		return ok(c, fiber.Map{"online": true, "version": version.Version, "local": true})
+	}
+	started := time.Now()
+	ver, err := a.Cluster.Ping(nodeID)
+	latency := time.Since(started).Milliseconds()
+	if err != nil {
+		return failMsg(c, 502, "NODE_OFFLINE", err.Error())
+	}
+	return ok(c, fiber.Map{"online": true, "version": ver, "latency_ms": latency})
+}
+
+// deleteNode forgets a node: the credential is revoked and the row removed.
+// Nodes that still host servers are refused unless ?force=true, which only
+// drops the panel's records (the node keeps its files).
+func (a *App) deleteNode(c fiber.Ctx) error {
+	p := a.requireSuperuser(c)
+	if p == nil {
+		return nil
+	}
+	nodeID := c.Params("node_id")
+	if nodeID == servers.LocalNodeID {
+		return failMsg(c, 400, "INVALID_NODE", "the panel node cannot be removed")
+	}
+	var nodeIDPtr *string
+	if nodeID != servers.LocalNodeID {
+		id := nodeID
+		nodeIDPtr = &id
+	}
+	rows, _ := a.DB.ListServersByNode(nodeIDPtr)
+	force := fiber.Query[bool](c, "force", false)
+	if len(rows) > 0 && !force {
+		names := []string{}
+		for _, def := range rows {
+			names = append(names, def.ServerName)
+		}
+		return c.Status(409).JSON(fiber.Map{
+			"status": "error", "error": "NODE_HAS_SERVERS",
+			"error_data":  fmt.Sprintf("this node still hosts %d server(s)", len(rows)),
+			"servers":     names,
+			"force_hint":  "pass ?force=true to remove the panel records only",
+		})
+	}
+	for _, def := range rows {
+		_ = a.DB.DeleteBackupsForServer(def.ServerID)
+		_ = a.DB.DeleteSchedulesForServer(def.ServerID)
+		_ = a.DB.DeleteWebhooksForServer(def.ServerID)
+		_ = a.DB.DeleteServer(def.ServerID)
+	}
+	a.Cluster.Forget(nodeID)
+	a.Nodes.Forget(nodeID)
+	if err := a.DB.DeleteNode(nodeID); err != nil {
 		return fail(c, 404, "NOT_FOUND")
 	}
-	return ok(c, fiber.Map{"deleted": c.Params("node_id")})
+	a.Log.Audit(p.Username, p.UserID, "", c.IP(), "Removed cluster node "+nodeID)
+	return ok(c, fiber.Map{"deleted": nodeID, "servers_removed": len(rows)})
 }
 
 // ---------------- manifests ----------------

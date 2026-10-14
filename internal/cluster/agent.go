@@ -1,180 +1,348 @@
 package cluster
 
 import (
-        "encoding/json"
-        "fmt"
-        "net"
-        "sync"
-        "time"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
 
-        "google.golang.org/grpc"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 
-        pb "github.com/FlameInTheDark/servy/internal/cluster/pb"
-        "github.com/FlameInTheDark/servy/internal/database"
-        "github.com/FlameInTheDark/servy/internal/dockerx"
-        "github.com/FlameInTheDark/servy/internal/events"
-        "github.com/FlameInTheDark/servy/internal/logging"
-        "github.com/FlameInTheDark/servy/internal/ports"
-        "github.com/FlameInTheDark/servy/internal/servers"
-        "github.com/FlameInTheDark/servy/internal/version"
+	pb "github.com/FlameInTheDark/servy/internal/cluster/pb"
+	"github.com/FlameInTheDark/servy/internal/database"
+	"github.com/FlameInTheDark/servy/internal/events"
+	"github.com/FlameInTheDark/servy/internal/logging"
+	"github.com/FlameInTheDark/servy/internal/version"
 )
 
-// AgentDeps bundles what an agent needs (headless: no HTTP UI).
+// AgentCredentials are what an agent needs to talk to its panel. They are
+// written next to the config file with 0600 permissions after a successful join.
+type AgentCredentials struct {
+	NodeID    string `json:"node_id"`
+	Token     string `json:"token"`
+	PanelAddr string `json:"panel_addr"`
+	Name      string `json:"name"`
+	JoinedAt  string `json:"joined_at"`
+}
+
+// CredentialsPath returns the credentials file inside a data dir.
+func CredentialsPath(dataDir string) string {
+	return filepath.Join(dataDir, "config", "agent.json")
+}
+
+// LoadCredentials reads stored agent credentials (empty when not joined yet).
+func LoadCredentials(dataDir string) (*AgentCredentials, error) {
+	raw, err := os.ReadFile(CredentialsPath(dataDir))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var creds AgentCredentials
+	if err := json.Unmarshal(raw, &creds); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", CredentialsPath(dataDir), err)
+	}
+	if creds.NodeID == "" || creds.Token == "" {
+		return nil, fmt.Errorf("%s is incomplete; re-join the node", CredentialsPath(dataDir))
+	}
+	return &creds, nil
+}
+
+// SaveCredentials persists agent credentials with restrictive permissions.
+func SaveCredentials(dataDir string, creds *AgentCredentials) error {
+	path := CredentialsPath(dataDir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(creds, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, raw, 0o600)
+}
+
+// JoinOptions configures a join attempt.
+type JoinOptions struct {
+	PanelAddr string // host:port of the panel node API
+	Ticket    string
+	Name      string
+	GRPCPort  int
+	Advertise string // optional explicit dial address
+	Version   string
+}
+
+// Join exchanges a ticket for node credentials. It does not need any local
+// state, so it can run before a data dir exists (CLI bootstrap, containers).
+func Join(opts JoinOptions) (*AgentCredentials, error) {
+	hostname, _ := os.Hostname()
+	addr := opts.PanelAddr
+	cc, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, fmt.Errorf("connect to panel %s: %w", addr, err)
+	}
+	defer cc.Close()
+	cl := pb.NewNodeServiceClient(cc)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	req := &pb.JoinRequest{
+		Ticket: opts.Ticket, Name: opts.Name, Version: opts.Version, Hostname: hostname,
+		GrpcPort: int32(opts.GRPCPort), Advertise: opts.Advertise,
+		Capabilities: []string{"servers", "files", "terminal", "backups", "creation"},
+	}
+	res, err := cl.Join(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("join failed: %w", err)
+	}
+	if !res.Accepted {
+		return nil, fmt.Errorf("panel rejected the join: %s", res.Message)
+	}
+	name := opts.Name
+	if name == "" {
+		name = hostname
+	}
+	return &AgentCredentials{
+		NodeID: res.NodeId, Token: res.Token, PanelAddr: addr, Name: name,
+		JoinedAt: database.Now(),
+	}, nil
+}
+
+// AgentDeps bundles what the headless agent needs.
 type AgentDeps struct {
-        DB        *database.Queries
-        Log       *logging.Manager
-        Bus       *events.Bus
-        Registry  *servers.Registry
-        HostStats *servers.HostStats
-        PanelAddr string
-        Token     string
-        NodeName  string
-        GRPCPort  int
+	DB   *database.Queries
+	Log  *logging.Manager
+	Bus  *events.Bus
+	Deps Deps // registry, creation, backups, files, host stats …
+
+	DataDir   string
+	PanelAddr string
+	Token     string
+	NodeID    string
+	NodeName  string
+	GRPCPort  int
 }
 
-// Agent runs the headless node: local gRPC server + upstream link to the panel.
+// Agent runs the headless node: local gRPC node API plus the upstream link.
 type Agent struct {
-        deps   AgentDeps
-        svc    *Service
-        client *Client
-        grpc   *grpc.Server
-        stop   chan struct{}
+	deps   AgentDeps
+	svc    *Service
+	grpc   *grpc.Server
+	stop   chan struct{}
+	once   sync.Once
+	creds  *AgentCredentials
+	cancel func()
 }
 
-// NewAgent builds the agent.
+// NewAgent builds the agent runtime.
 func NewAgent(deps AgentDeps) *Agent {
-        sd := servers.Deps{DB: deps.DB, Bus: deps.Bus, Log: deps.Log, Cfg: nil,
-                Docker: dockerMgrForAgent(), Ports: ports.NewAllocator()}
-        _ = sd
-        return &Agent{deps: deps, stop: make(chan struct{})}
+	return &Agent{deps: deps, stop: make(chan struct{})}
 }
 
-// Run starts the gRPC server and the upstream keepalive loop (blocking).
+// Run starts the node API and the upstream loops (blocking).
 func (a *Agent) Run() error {
-        nodeID := EnsureNodeID(a.deps.DB)
-        NodeID = nodeID
+	log := a.deps.Log.Get("server")
+	a.deps.Deps.DataDir = a.deps.DataDir
+	a.deps.Deps.ImportsDir = filepath.Join(a.deps.DataDir, "import")
+	a.deps.Deps.Version = version.Version
 
-        // gRPC server (panel connects to us for proxied ops)
-        a.svc = NewService(servers.Deps{DB: a.deps.DB, Bus: a.deps.Bus, Log: a.deps.Log,
-                Docker: dockerMgrForAgent(), Ports: ports.NewAllocator()}, a.deps.Registry, a.deps.Token, a.deps.Log, a.deps.Bus)
-        lis, err := net.Listen("tcp", fmt.Sprintf(":%d", a.deps.GRPCPort))
-        if err != nil {
-                return err
-        }
-        a.grpc = grpc.NewServer()
-        pb.RegisterNodeServiceServer(a.grpc, a.svc)
-        go func() {
-                if err := a.grpc.Serve(lis); err != nil {
-                        a.deps.Log.Get("server").Error("agent grpc server: %v", err)
-                }
-        }()
-        a.deps.Log.Get("server").Info("agent gRPC listening on :%d (node %s)", a.deps.GRPCPort, nodeID)
+	// local node API (the panel calls into this)
+	a.svc = NewAgentService(a.deps.Deps, a.deps.Token, a.deps.NodeName, a.deps.PanelAddr)
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", a.deps.GRPCPort))
+	if err != nil {
+		return fmt.Errorf("listen on node API port %d: %w", a.deps.GRPCPort, err)
+	}
+	a.grpc = grpc.NewServer()
+	pb.RegisterNodeServiceServer(a.grpc, a.svc)
+	go func() {
+		if err := a.grpc.Serve(lis); err != nil {
+			log.Error("node API stopped: %v", err)
+		}
+	}()
+	log.Info("node API listening on :%d (node %s)", a.deps.GRPCPort, a.deps.NodeID)
 
-        // upstream: register + heartbeats + event stream
-        a.client = NewClient(a.deps.Token)
-        go a.upstreamLoop(nodeID)
-        <-a.stop
-        a.grpc.Stop()
-        return nil
+	go a.upstreamLoop()
+	<-a.stop
+	a.grpc.GracefulStop()
+	return nil
 }
 
-// upstreamLoop maintains hello + heartbeats + event stream to the panel.
-func (a *Agent) upstreamLoop(nodeID string) {
-        addr := a.deps.PanelAddr
-        caps := []string{"servers", "files", "terminal", "backups-local"}
-        for {
-                err := a.client.Hello(addr, nodeID, a.deps.NodeName, version.Version, "agent", caps)
-                if err != nil {
-                        a.deps.Log.Get("server").Warning("agent: panel hello failed (%v); retrying in 15s", err)
-                        time.Sleep(15 * time.Second)
-                        continue
-                }
-                a.deps.Log.Get("server").Info("agent: registered with panel %s", addr)
-                break
-        }
-        // mark node row locally too (so the agent's own UI-less state knows itself)
-        now := database.Now()
-        a.deps.DB.UpsertNode(nodeID, a.deps.NodeName, addr, "agent", "online", &now, &version.Version, nil, nil, now)
-
-        // event pump: forward local bus events to the panel via StreamEvents
-        go func() {
-                ch, cancel := a.deps.Bus.Subscribe("*")
-                defer cancel()
-                for {
-                        select {
-                        case <-a.stop:
-                                return
-                        case ev, ok := <-ch:
-                                if !ok {
-                                        return
-                                }
-                                if cl, err := a.client.connFor(addr); err == nil {
-                                        stream, err := cl.StreamEvents(a.client.ctx())
-                                        if err == nil {
-                                                payload, _ := json.Marshal(ev.Data)
-                                                stream.Send(&pb.NodeEvent{
-                                                        NodeId: nodeID, ServerId: ev.ServerID, Type: ev.Type,
-                                                        Payload: string(payload), Timestamp: time.Now().Unix(),
-                                                })
-                                                stream.CloseSend()
-                                        }
-                                }
-                        }
-                }
-        }()
-
-        tick := time.NewTicker(10 * time.Second)
-        defer tick.Stop()
-        for {
-                select {
-                case <-a.stop:
-                        return
-                case <-tick.C:
-                        running := 0
-                        for _, sup := range a.deps.Registry.All() {
-                                if sup.State() == "running" {
-                                        running++
-                                }
-                        }
-                        if err := a.client.Heartbeat(addr, nodeID, nil, version.Version, running); err != nil {
-                                a.deps.Log.Get("server").Warning("agent: heartbeat failed: %v", err)
-                        } else {
-                                now := database.Now()
-                                a.deps.DB.UpdateNodeStatus("online", &now, &version.Version, nodeID)
-                        }
-                }
-        }
+// Stop shuts the agent down.
+func (a *Agent) Stop() {
+	a.once.Do(func() { close(a.stop) })
 }
 
-// EnsureNodeID loads or creates this node's identity row.
-func EnsureNodeID(db *database.Queries) string {
-        if n, err := db.GetNodeByName("self"); err == nil {
-                return n.NodeID
-        }
-        id := "node-" + database.Now()[:10] + "-" + randomSuffix()
-        db.UpsertNode(id, "self", "", "agent", "online", nil, nil, nil, nil, database.Now())
-        return id
+// upstreamLoop keeps the panel registration, heartbeats and event stream alive.
+func (a *Agent) upstreamLoop() {
+	log := a.deps.Log.Get("server")
+	backoff := time.Second
+
+	// one long-lived event stream, reconnected on failure
+	go a.eventLoop()
+
+	tick := time.NewTicker(10 * time.Second)
+	defer tick.Stop()
+
+	report := func() error {
+		cc, err := a.dial()
+		if err != nil {
+			return err
+		}
+		defer cc.Close()
+		cl := pb.NewNodeServiceClient(cc)
+		ctx, cancel := a.callCtx(15 * time.Second)
+		defer cancel()
+
+		// hello refreshes name/address/version after a restart or a move
+		helloRes, err := cl.Hello(ctx, &pb.HelloRequest{
+			NodeId: a.deps.NodeID, Name: a.deps.NodeName, Version: version.Version,
+			Role: "agent", Capabilities: []string{"servers", "files", "terminal", "backups", "creation"},
+		})
+		if err != nil {
+			return err
+		}
+		if !helloRes.Accepted {
+			return fmt.Errorf("%s", helloRes.Message)
+		}
+
+		hb := a.heartbeat()
+		res, err := cl.Heartbeat(ctx, hb)
+		if err != nil {
+			return err
+		}
+		if !res.Ok {
+			return fmt.Errorf("%s", res.Message)
+		}
+		return nil
+	}
+
+	for {
+		if err := report(); err != nil {
+			log.Warning("agent: panel unreachable (%v); retrying", err)
+			select {
+			case <-a.stop:
+				return
+			case <-time.After(backoff):
+			}
+			if backoff < 30*time.Second {
+				backoff *= 2
+			}
+			continue
+		}
+		if backoff != time.Second {
+			log.Info("agent: reconnected to panel %s", a.deps.PanelAddr)
+			backoff = time.Second
+		}
+		select {
+		case <-a.stop:
+			return
+		case <-tick.C:
+		}
+	}
 }
 
-func randomSuffix() string {
-        b := make([]byte, 4)
-        for i := range b {
-                b[i] = "0123456789abcdef"[time.Now().UnixNano()>>uint((i+1)*7)&0xf]
-        }
-        return string(b)
+// eventLoop forwards local bus events to the panel over one stream.
+func (a *Agent) eventLoop() {
+	log := a.deps.Log.Get("server")
+	ch, cancel := a.deps.Bus.Subscribe("*")
+	defer cancel()
+	backoff := time.Second
+	for {
+		select {
+		case <-a.stop:
+			return
+		default:
+		}
+		cc, err := a.dial()
+		if err != nil {
+			select {
+			case <-a.stop:
+				return
+			case <-time.After(backoff):
+				continue
+			}
+		}
+		cl := pb.NewNodeServiceClient(cc)
+		ctx, cancelCall := context.WithCancel(context.Background())
+		stream, err := cl.StreamEvents(ctx)
+		if err != nil {
+			cancelCall()
+			cc.Close()
+			select {
+			case <-a.stop:
+				return
+			case <-time.After(backoff):
+			}
+			continue
+		}
+		log.Info("agent: event stream to panel established")
+		backoff = time.Second
+	send:
+		for {
+			select {
+			case <-a.stop:
+				cancelCall()
+				cc.Close()
+				return
+			case ev, ok := <-ch:
+				if !ok {
+					break send
+				}
+				payload, _ := json.Marshal(ev.Data)
+				err := stream.Send(&pb.NodeEvent{
+					NodeId: a.deps.NodeID, ServerId: ev.ServerID, Type: ev.Type,
+					Payload: string(payload), Timestamp: time.Now().Unix(),
+				})
+				if err != nil {
+					break send
+				}
+			}
+		}
+		cancelCall()
+		cc.Close()
+		select {
+		case <-a.stop:
+			return
+		case <-time.After(time.Second):
+		}
+	}
 }
 
-// dockerMgrForAgent resolves the docker execution backend for agent mode
-// (nil-safe: agents without a daemon run servers as host processes).
-var agentDockerOnce sync.Once
-var agentDocker *dockerx.Manager
+func (a *Agent) dial() (*grpc.ClientConn, error) {
+	return grpc.NewClient(a.deps.PanelAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+}
 
-func dockerMgrForAgent() *dockerx.Manager {
-        agentDockerOnce.Do(func() {
-                m, err := dockerx.New()
-                if err == nil {
-                        agentDocker = m
-                }
-        })
-        return agentDocker
+func (a *Agent) callCtx(timeout time.Duration) (context.Context, context.CancelFunc) {
+	ctx := metadata.AppendToOutgoingContext(context.Background(),
+		"authorization", "Bearer "+a.deps.Token, "node-id", a.deps.NodeID)
+	return context.WithTimeout(ctx, timeout)
+}
+
+// heartbeat collects this node's telemetry.
+func (a *Agent) heartbeat() *pb.HeartbeatRequest {
+	hb := &pb.HeartbeatRequest{NodeId: a.deps.NodeID, Version: version.Version}
+	if a.deps.Deps.HostStats != nil {
+		snap := a.deps.Deps.HostStats.Snapshot()
+		hb.CpuUsage = snap.CPUUsage
+		hb.MemPercent = snap.MemPercent
+		hb.MemUsed = int64(snap.MemUsage)
+		hb.MemTotal = int64(snap.MemTotal)
+	}
+	if a.deps.Deps.Registry != nil {
+		all := a.deps.Deps.Registry.All()
+		hb.TotalServers = int32(len(all))
+		running := 0
+		for _, sup := range all {
+			if sup.State() == "running" {
+				running++
+			}
+		}
+		hb.RunningServers = int32(running)
+	}
+	return hb
 }

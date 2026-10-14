@@ -57,6 +57,8 @@ type App struct {
         Metrics     *metrics.Collector
         HostStats   *servers.HostStats
         Cluster     *cluster.Client
+        Nodes       *cluster.NodeRegistry
+        Tickets     *cluster.TicketStore
         Bucket      *bigbucket.Client
         Steam       *steamcmd.Manager
         SteamCatalog *steamcmd.Catalog
@@ -175,23 +177,6 @@ func (a *App) requireServer(c fiber.Ctx, perm int) (string, interface{}, bool) {
                 return "", nil, false
         }
         return serverID, nil, true
-}
-
-// remoteNodeAddr returns the owning node address for a server ("" = local).
-func (a *App) remoteNodeAddr(serverID string) string {
-        def, err := a.DB.GetServer(serverID)
-        if err != nil || def.NodeID == nil {
-                return ""
-        }
-        nodeID := *def.NodeID
-        if nodeID == "" || nodeID == servers.LocalNodeID {
-                return ""
-        }
-        node, err := a.DB.GetNode(nodeID)
-        if err != nil {
-                return ""
-        }
-        return node.Address
 }
 
 // Router builds the fiber app with every route group.

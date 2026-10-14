@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { toast } from "sonner";
 import {
-  Upload, Download, Terminal, Gamepad2, Boxes, ArrowLeft, ArrowRight, Loader2, FileArchive, Container, Cpu, AlertTriangle, Monitor, X,
+  Upload, Download, Terminal, Gamepad2, Boxes, ArrowLeft, ArrowRight, Loader2, FileArchive, Container, Cpu, AlertTriangle, Monitor, X, Network, HardDrive,
 } from "lucide-react";
 import { useApi } from "@/hooks/useApi";
 import { api, GET, SteamGame, SteamLaunchOption, JavaInstall, realtime } from "@/api/client";
@@ -45,6 +45,10 @@ export default function CreateServerPage() {
   const { data: javaData } = useApi<{ installs: JavaInstall[] }>("/panel/java");
   const { data: dockerData } = useApi<{ available: boolean }>("/panel/docker");
   const { data: shellsData } = useApi<{ default: string; platform: string; shells: ShellInfo[] }>("/panel/shells");
+  const { data: cluster } = useApi<{ nodes: any[]; cluster_enabled: boolean; panel_address: string }>("/panel/nodes", { pollMs: 30000 });
+  const clusterNodes = (cluster?.nodes || []).filter((n: any) => !n.local);
+  const onlineNodes = clusterNodes.filter((n: any) => n.online);
+  const targetNode = form.node ? clusterNodes.find((n: any) => n.node_id === form.node) : undefined;
   const shells = shellsData?.shells || [];
   const javaInstalls = javaData?.installs || [];
   const pickedSteamGame = form.steam_slug ? steamGames?.find((g) => g.slug === form.steam_slug) : undefined;
@@ -90,7 +94,7 @@ export default function CreateServerPage() {
     }
 
     try {
-      const payload: any = { ...form };
+      const payload: any = { ...form, node: form.node || "" };
       if (isDocker) {
         payload.execution_backend = "docker";
         payload.docker_ports = (form.docker_ports || "").split(",").map((x: string) => x.trim()).filter(Boolean);
@@ -278,6 +282,56 @@ export default function CreateServerPage() {
             <CardDescription>Basic settings. You can change everything later.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {/* where the server runs */}
+            <div className="space-y-2 rounded-lg border p-4">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <Network className="h-4 w-4 text-primary" /> Where should it run?
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => set("node", "")}
+                  className={cn(
+                    "rounded-lg border p-3 text-left text-sm transition-all hover:border-primary/60",
+                    !form.node && "border-primary ring-1 ring-primary"
+                  )}
+                >
+                  <div className="flex items-center gap-2 font-medium"><HardDrive className="h-3.5 w-3.5" /> This panel</div>
+                  <div className="mt-0.5 text-xs text-muted-foreground">Runs on the machine hosting this panel.</div>
+                </button>
+                {onlineNodes.length === 0 ? (
+                  <div className="rounded-lg border border-dashed p-3 text-xs text-muted-foreground">
+                    No other nodes online. Add one under <span className="font-medium text-foreground">Nodes</span> and it appears here.
+                  </div>
+                ) : (
+                  onlineNodes.map((n: any) => (
+                    <button
+                      key={n.node_id}
+                      type="button"
+                      onClick={() => set("node", n.node_id)}
+                      className={cn(
+                        "rounded-lg border p-3 text-left text-sm transition-all hover:border-primary/60",
+                        form.node === n.node_id && "border-primary ring-1 ring-primary"
+                      )}
+                    >
+                      <div className="flex items-center gap-2 font-medium">
+                        <Network className="h-3.5 w-3.5" /> {n.name}
+                      </div>
+                      <div className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
+                        {n.address} · {n.servers_running ?? 0}/{n.servers_total ?? 0} servers
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
+              {targetNode && (
+                <p className="text-xs text-muted-foreground">
+                  The node downloads and extracts everything itself. Files are streamed to it automatically — enter paths as they exist
+                  on <span className="font-medium text-foreground">{targetNode.name}</span>, not on this panel.
+                </p>
+              )}
+            </div>
+
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label>Server name</Label>
@@ -639,7 +693,11 @@ export default function CreateServerPage() {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-2 text-sm">
-            {Object.entries(form).filter(([k, v]) => k !== "steam_options" && v !== "" && v !== undefined && v !== null && v !== false)
+            <div className="flex justify-between gap-4 border-b py-1.5">
+              <span className="text-muted-foreground">runs on</span>
+              <span className="font-mono text-xs truncate max-w-[60%]">{targetNode ? targetNode.name : "this panel"}</span>
+            </div>
+            {Object.entries(form).filter(([k, v]) => k !== "steam_options" && k !== "node" && v !== "" && v !== undefined && v !== null && v !== false)
               .map(([k, v]) => (
                 <div key={k} className="flex justify-between gap-4 border-b py-1.5">
                   <span className="text-muted-foreground">{k.replace(/_/g, " ")}</span>

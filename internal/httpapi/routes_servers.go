@@ -2,8 +2,6 @@ package httpapi
 
 import (
         "encoding/json"
-        "fmt"
-        "os"
         "path"
         "path/filepath"
         "sort"
@@ -157,8 +155,8 @@ func (a *App) serverView(def gen.Server, rt *models.ServerRuntime) map[string]in
         return v
 }
 
-// loadServer returns (sup, def, remoteAddr, errorResponse) — remote servers
-// return a definition with a non-empty remoteAddr and nil sup.
+// loadServer returns (sup, def, nodeID, ok) — remote servers come back with a
+// non-empty nodeID and a nil supervisor.
 func (a *App) loadServer(c fiber.Ctx, perm int) (*servers.Supervisor, gen.Server, string, bool) {
         p := a.requireAuth(c)
         if p == nil {
@@ -178,8 +176,8 @@ func (a *App) loadServer(c fiber.Ctx, perm int) (*servers.Supervisor, gen.Server
                 _ = fail(c, 404, "SERVER_NOT_FOUND")
                 return nil, gen.Server{}, "", false
         }
-        if addr := a.remoteNodeAddr(serverID); addr != "" {
-                return nil, def, addr, true
+        if nodeID := a.nodeIDForServer(serverID); nodeID != "" {
+                return nil, def, nodeID, true
         }
         sup, err := a.Registry.Get(serverID)
         if err != nil {
@@ -208,6 +206,8 @@ func (a *App) listServers(c fiber.Ctx) error {
                 if sup, err := a.Registry.Get(def.ServerID); err == nil {
                         r := sup.Runtime()
                         rt = &r
+                } else if def.NodeID != nil && *def.NodeID != "" && *def.NodeID != servers.LocalNodeID {
+                        rt = a.remoteRuntime(def.ServerID)
                 }
                 out = append(out, a.serverView(def, rt))
         }
@@ -265,19 +265,10 @@ func (a *App) createServer(c fiber.Ctx) error {
                 return err
         }
         cr := req.toCreationRequest()
-        // optional node placement
-        if req.Node != "" {
-                node, err := a.DB.GetNode(req.Node)
-                if err != nil {
-                        return failMsg(c, 400, "INVALID_NODE", "unknown node")
-                }
-                // create on remote agent, then record locally
-                def := req.toDef(a.ServersRoot)
-                if err := a.Cluster.CreateServer(node.Address, def); err != nil {
-                        return failMsg(c, 502, "NODE_ERROR", err.Error())
-                }
-                a.DB.SetServerNode(&node.NodeID, databaseNow(), def.ServerID)
-                return ok(c, fiber.Map{"server_id": def.ServerID, "remote": true, "node": node.NodeID})
+        // node placement: the node runs its own creation pipeline (downloads,
+        // extraction, steam install) and the panel mirrors the resulting row.
+        if req.Node != "" && req.Node != servers.LocalNodeID {
+                return a.createServerOnNode(c, p, req.Node, cr)
         }
         res, err := a.Creation.Create(cr, p.UserID)
         if err != nil {
@@ -287,21 +278,16 @@ func (a *App) createServer(c fiber.Ctx) error {
 }
 
 func (a *App) getServer(c fiber.Ctx) error {
-        sup, def, addr, good := a.loadServer(c, -1)
+        sup, def, nodeID, good := a.loadServer(c, -1)
         if !good {
                 return nil
         }
-        if addr != "" {
-                st, err := a.Cluster.Status(addr, def.ServerID)
-                if err == nil {
-                        return ok(c, fiber.Map{
-                                "server_id": def.ServerID, "server_name": def.ServerName, "type": def.Type,
-                                "node_id": deref(def.NodeID), "remote": true,
-                                "state": st.State, "cpu": st.Cpu, "mem": st.Mem, "online": st.Online, "max": st.Max,
-                                "players": st.Players, "version": st.Version,
-                        })
-                }
-                return ok(c, a.serverView(def, nil))
+        if nodeID != "" {
+                view := a.serverView(def, a.remoteRuntime(def.ServerID))
+                view["remote"] = true
+                view["node_id"] = nodeID
+                view["node_online"] = a.nodeOnline(nodeID)
+                return ok(c, view)
         }
         rt := sup.Runtime()
         return ok(c, a.serverView(def, &rt))
@@ -311,14 +297,34 @@ func (a *App) patchServer(c fiber.Ctx) error {
         return a.patchServerConfig(c)
 }
 
+// applyServerPatch lives in the servers package (shared with cluster agents).
+func applyServerPatch(def *gen.Server, patch map[string]interface{}) { servers.ApplyServerPatch(def, patch) }
+
 func (a *App) patchServerConfig(c fiber.Ctx) error {
-        sup, _, _, good := a.loadServer(c, authz.ServerConfig)
+        sup, def, nodeID, good := a.loadServer(c, authz.ServerConfig)
         if !good {
                 return nil
         }
         var patch map[string]interface{}
         if err := parseBody(c, &patch); err != nil {
                 return err
+        }
+        if nodeID != "" {
+                if !a.nodeOnline(nodeID) {
+                        return fail(c, 502, "NODE_OFFLINE")
+                }
+                raw, err := a.Cluster.UpdateConfig(nodeID, def.ServerID, patch)
+                if err != nil {
+                        return failMsg(c, 502, "NODE_ERROR", err.Error())
+                }
+                if err := a.applyRemoteDef(raw, nodeID); err != nil {
+                        return failMsg(c, 500, "SERVER_ERROR", err.Error())
+                }
+                updated, _ := a.DB.GetServer(def.ServerID)
+                view := a.serverView(updated, a.remoteRuntime(def.ServerID))
+                view["remote"] = true
+                view["node_id"] = nodeID
+                return ok(c, view)
         }
         if err := a.Registry.UpdateConfig(sup.Definition().ServerID, func(def *gen.Server) {
                 applyServerPatch(def, patch)
@@ -330,129 +336,6 @@ func (a *App) patchServerConfig(c fiber.Ctx) error {
         return ok(c, a.serverView(updated, &rt))
 }
 
-func applyServerPatch(def *gen.Server, patch map[string]interface{}) {
-        if v, ok := patch["server_name"].(string); ok && v != "" {
-                def.ServerName = v
-        }
-        if v, ok := patch["executable"].(string); ok && v != "" {
-                def.Executable = v
-        }
-        if v, ok := patch["log_path"].(string); ok {
-                def.LogPath = v
-        }
-        if v, ok := patch["execution_command"].(string); ok && v != "" {
-                def.ExecutionCommand = v
-        }
-        if v, ok := patch["stop_command"].(string); ok {
-                def.StopCommand = v
-        }
-        if v, ok := patch["stop_action"].(string); ok {
-                def.StopAction = v
-        }
-        if v, ok := patch["io_mode"].(string); ok {
-                def.IoMode = v
-        }
-        if v, ok := patch["server_ip"].(string); ok {
-                def.ServerIp = v
-        }
-        if v, ok := patch["type"].(string); ok && v != "" {
-                def.Type = v
-        }
-        if v, ok := patch["executable_update_url"].(string); ok {
-                def.ExecutableUpdateUrl = &v
-        }
-        if v, ok := patch["auto_start"]; ok {
-                def.AutoStart = boolI(v)
-        }
-        if v, ok := patch["auto_start_delay"]; ok {
-                def.AutoStartDelay = numI(v, def.AutoStartDelay)
-        }
-        if v, ok := patch["crash_detection"]; ok {
-                def.CrashDetection = boolI(v)
-        }
-        if v, ok := patch["shutdown_timeout"]; ok {
-                def.ShutdownTimeout = numI(v, def.ShutdownTimeout)
-        }
-        if v, ok := patch["server_port"]; ok {
-                def.ServerPort = numI(v, def.ServerPort)
-        }
-        if v, ok := patch["logs_delete_after"]; ok {
-                def.LogsDeleteAfter = numI(v, def.LogsDeleteAfter)
-        }
-        if v, ok := patch["show_status"]; ok {
-                def.ShowStatus = boolI(v)
-        }
-        if v, ok := patch["count_players"]; ok {
-                def.CountPlayers = boolI(v)
-        }
-        if v, ok := patch["update_watcher"]; ok {
-                def.UpdateWatcher = boolI(v)
-        }
-        if v, ok := patch["ignored_exits"].(string); ok {
-                def.IgnoredExits = &v
-        }
-        // --- execution environment ---
-        if v, ok := patch["shell"].(string); ok && servers.ValidShellSelection(v) {
-                def.Shell = v
-        }
-        if v, ok := patch["java_selection"].(string); ok {
-                // legacy get_execution_java validation: "", "none", "java" or a
-                // detected/absolute JVM path
-                if v == "" || v == "none" || v == "java" || fileOrDirExists(v) {
-                        def.JavaSelection = v
-                }
-        }
-        if v, ok := patch["execution_backend"].(string); ok {
-                if v == "process" || v == "docker" {
-                        def.ExecutionBackend = v
-                }
-        }
-        if v, ok := patch["docker_image"].(string); ok {
-                def.DockerImage = &v
-        }
-        if v, ok := patch["docker_env"]; ok {
-                if b, err := json.Marshal(toStringMap(v)); err == nil {
-                        s := string(b)
-                        def.DockerEnv = &s
-                }
-        }
-        if v, ok := patch["docker_ports"]; ok {
-                if b, err := json.Marshal(toStringSlice(v)); err == nil {
-                        s := string(b)
-                        def.DockerPorts = &s
-                }
-        }
-        if v, ok := patch["docker_binds"]; ok {
-                binds := []string{}
-                for _, b := range toStringSlice(v) {
-                        // host side must be absolute, no traversal
-                        host := strings.SplitN(b, ":", 2)[0]
-                        if filepath.IsAbs(host) && !strings.Contains(host, "..") {
-                                binds = append(binds, b)
-                        }
-                }
-                if b, err := json.Marshal(binds); err == nil {
-                        s := string(b)
-                        def.DockerBinds = &s
-                }
-        }
-        if v, ok := patch["docker_network"].(string); ok {
-                def.DockerNetwork = &v
-        }
-        if v, ok := patch["docker_workdir"].(string); ok {
-                if v == "" || (strings.HasPrefix(v, "/") && !strings.Contains(v, "..")) {
-                        def.DockerWorkdir = &v
-                }
-        }
-        if v, ok := patch["docker_autoremove"]; ok {
-                def.DockerAutoremove = boolI(v)
-        }
-        if def.Type == models.TypeSteamCmd {
-                if snapshot, err := steamcmd.GameSnapshotFromDefinitions(def.Definitions); err == nil && snapshot != nil {
-                        def.Shell = "none"
-                }
-        }
-}
 
 func (a *App) deleteServer(c fiber.Ctx) error {
         p := a.requireAuth(c)
@@ -464,11 +347,23 @@ func (a *App) deleteServer(c fiber.Ctx) error {
         }
         serverID := c.Params("id")
         removeFiles := fiber.Query[bool](c, "files", false)
-        if addr := a.remoteNodeAddr(serverID); addr != "" {
-                if err := a.Cluster.DeleteServer(addr, serverID, removeFiles); err != nil {
-                        return failMsg(c, 502, "NODE_ERROR", err.Error())
+        if nodeID := a.nodeIDForServer(serverID); nodeID != "" {
+                if !a.nodeOnline(nodeID) {
+                        return fail(c, 502, "NODE_OFFLINE")
                 }
-                a.DB.DeleteServer(serverID)
+                // drop every panel-side record first so the UI cannot show a
+                // server whose node is gone, then delete on the node.
+                if err := a.DB.DeleteBackupsForServer(serverID); err != nil {
+                        return failMsg(c, 500, "SERVER_ERROR", err.Error())
+                }
+                if err := a.Cluster.Delete(nodeID, serverID, removeFiles); err != nil {
+                        a.Log.Get("server").Error("cluster: delete %s on %s failed: %v", serverID, nodeID, err)
+                }
+                _ = a.DB.DeleteSchedulesForServer(serverID)
+                _ = a.DB.DeleteWebhooksForServer(serverID)
+                if err := a.DB.DeleteServer(serverID); err != nil {
+                        return failMsg(c, 500, "SERVER_ERROR", err.Error())
+                }
                 return ok(c, fiber.Map{"deleted": serverID})
         }
         if err := a.Creation.DeleteFlow(serverID, removeFiles, p.UserID); err != nil {
@@ -478,7 +373,7 @@ func (a *App) deleteServer(c fiber.Ctx) error {
 }
 
 // serverAction runs a lifecycle action with remote routing.
-func (a *App) serverAction(c fiber.Ctx, perm int, local func(sup *servers.Supervisor, p fiber.Ctx) error, remote func(addr, id string) error) error {
+func (a *App) serverAction(c fiber.Ctx, perm int, local func(sup *servers.Supervisor, p fiber.Ctx) error, remote func(nodeID, id string) error) error {
         p := a.requireAuth(c)
         if p == nil {
                 return nil
@@ -487,11 +382,14 @@ func (a *App) serverAction(c fiber.Ctx, perm int, local func(sup *servers.Superv
                 return fail(c, 403, "NOT_AUTHORIZED")
         }
         serverID := c.Params("id")
-        if addr := a.remoteNodeAddr(serverID); addr != "" {
-                if err := remote(addr, serverID); err != nil {
+        if nodeID := a.nodeIDForServer(serverID); nodeID != "" {
+                if !a.nodeOnline(nodeID) {
+                        return fail(c, 502, "NODE_OFFLINE")
+                }
+                if err := remote(nodeID, serverID); err != nil {
                         return failMsg(c, 502, "NODE_ERROR", err.Error())
                 }
-                return ok(c, fiber.Map{"server_id": serverID, "action": "remote"})
+                return ok(c, fiber.Map{"server_id": serverID, "action": "remote", "node_id": nodeID})
         }
         sup, err := a.Registry.Get(serverID)
         if err != nil {
@@ -506,25 +404,25 @@ func (a *App) serverAction(c fiber.Ctx, perm int, local func(sup *servers.Superv
 func (a *App) serverStart(c fiber.Ctx) error {
         return a.serverAction(c, authz.ServerCommands, func(sup *servers.Supervisor, c fiber.Ctx) error {
                 return sup.Start(userIDOf(c))
-        }, a.Cluster.Start)
+        }, a.Cluster.StartServer)
 }
 
 func (a *App) serverStop(c fiber.Ctx) error {
         return a.serverAction(c, authz.ServerCommands, func(sup *servers.Supervisor, c fiber.Ctx) error {
                 return sup.Stop("api", userIDOf(c))
-        }, a.Cluster.Stop)
+        }, a.Cluster.StopServer)
 }
 
 func (a *App) serverRestart(c fiber.Ctx) error {
         return a.serverAction(c, authz.ServerCommands, func(sup *servers.Supervisor, c fiber.Ctx) error {
                 return sup.Restart(userIDOf(c), nil)
-        }, a.Cluster.Restart)
+        }, a.Cluster.RestartServer)
 }
 
 func (a *App) serverKill(c fiber.Ctx) error {
         return a.serverAction(c, authz.ServerCommands, func(sup *servers.Supervisor, c fiber.Ctx) error {
                 return sup.Kill(userIDOf(c))
-        }, a.Cluster.Kill)
+        }, a.Cluster.KillServer)
 }
 
 func (a *App) serverStdin(c fiber.Ctx) error {
@@ -542,8 +440,11 @@ func (a *App) serverStdin(c fiber.Ctx) error {
         if err := parseBody(c, &req); err != nil {
                 return err
         }
-        if addr := a.remoteNodeAddr(serverID); addr != "" {
-                if err := a.Cluster.SendCommand(addr, serverID, req.Command); err != nil {
+        if nodeID := a.nodeIDForServer(serverID); nodeID != "" {
+                if !a.nodeOnline(nodeID) {
+                        return fail(c, 502, "NODE_OFFLINE")
+                }
+                if err := a.Cluster.SendCommand(nodeID, serverID, req.Command); err != nil {
                         return failMsg(c, 502, "NODE_ERROR", err.Error())
                 }
                 return ok(c, fiber.Map{"sent": req.Command})
@@ -565,13 +466,22 @@ func (a *App) serverAgreeEULA(c fiber.Ctx) error {
                 }
                 sup.SetRuntime(func(r *models.ServerRuntime) { r.EULAPending = false })
                 return nil
-        }, func(addr, id string) error { return nil })
+        }, func(nodeID, id string) error { return a.Cluster.AgreeEula(nodeID, id) })
 }
 
 func (a *App) serverUpdateExecutable(c fiber.Ctx) error {
-        sup, _, _, good := a.loadServer(c, authz.ServerConfig)
+        sup, def, nodeID, good := a.loadServer(c, authz.ServerConfig)
         if !good {
                 return nil
+        }
+        if nodeID != "" {
+                if !a.nodeOnline(nodeID) {
+                        return fail(c, 502, "NODE_OFFLINE")
+                }
+                if err := a.Cluster.UpdateExecutable(nodeID, def.ServerID); err != nil {
+                        return failMsg(c, 502, "NODE_ERROR", err.Error())
+                }
+                return ok(c, fiber.Map{"updated": true, "remote": true})
         }
         runBackup := func(serverID string) error {
                 if b, err := a.Backups.DefaultBackup(serverID); err == nil {
@@ -586,9 +496,28 @@ func (a *App) serverUpdateExecutable(c fiber.Ctx) error {
 }
 
 func (a *App) serverClone(c fiber.Ctx) error {
-        sup, def, _, good := a.loadServer(c, authz.ServerConfig)
+        sup, def, nodeID, good := a.loadServer(c, authz.ServerConfig)
         if !good {
                 return nil
+        }
+        if nodeID != "" {
+                if !a.nodeOnline(nodeID) {
+                        return fail(c, 502, "NODE_OFFLINE")
+                }
+                newID := newUUID()
+                raw, err := a.Cluster.Clone(nodeID, def.ServerID, newID, def.ServerName+"-clone")
+                if err != nil {
+                        return failMsg(c, 502, "NODE_ERROR", err.Error())
+                }
+                uid := userIDOf(c)
+                if err := a.applyRemoteDefWithOwner(raw, nodeID, &uid); err != nil {
+                        return failMsg(c, 500, "SERVER_ERROR", err.Error())
+                }
+                if err := a.Backups.EnsureDefault(def, a.BackupRoot); err != nil {
+                        // best-effort: cloning must not fail because of backups
+                        a.Log.Get("server").Warning("cluster: default backup for clone failed: %v", err)
+                }
+                return ok(c, fiber.Map{"server_id": newID, "name": def.ServerName + "-clone", "node_id": nodeID})
         }
         _ = sup
         newName := def.ServerName + "-clone"
@@ -613,12 +542,38 @@ func (a *App) stopAllServers(c fiber.Ctx) error {
         if p == nil {
                 return nil
         }
+        stopped, failed := 0, 0
         for _, sup := range a.Registry.All() {
                 if sup.State() == models.StateRunning {
+                        stopped++
                         go sup.Stop("stop_all", p.UserID)
                 }
         }
-        return ok(c, fiber.Map{"stopping": "all"})
+        // remote servers are stopped through their nodes (best effort: one dead
+        // node must not keep the rest running)
+        byNode := map[string][]string{}
+        rows, _ := a.DB.ListServers()
+        for _, def := range rows {
+                if def.NodeID == nil || *def.NodeID == "" || *def.NodeID == servers.LocalNodeID {
+                        continue
+                }
+                rt := a.remoteRuntime(def.ServerID)
+                if rt == nil || !rt.Running {
+                        continue
+                }
+                byNode[*def.NodeID] = append(byNode[*def.NodeID], def.ServerID)
+        }
+        for nodeID, ids := range byNode {
+                for _, serverID := range ids {
+                        if err := a.Cluster.StopServer(nodeID, serverID); err != nil {
+                                failed++
+                                a.Log.Get("server").Warning("cluster: stop_all failed for %s on %s: %v", serverID, nodeID, err)
+                                continue
+                        }
+                        stopped++
+                }
+        }
+        return ok(c, fiber.Map{"stopping": "all", "servers": stopped, "failed": failed})
 }
 
 func (a *App) serversStatus(c fiber.Ctx) error {
@@ -642,20 +597,39 @@ func (a *App) serversStatus(c fiber.Ctx) error {
                 rt := sup.Runtime()
                 out[def.ServerID] = fiber.Map{"running": rt.Running, "state": string(rt.State)}
         }
+        // remote servers report through their node's cached status
+        rows, _ := a.DB.ListServers()
+        for _, def := range rows {
+                if def.NodeID == nil || *def.NodeID == "" || *def.NodeID == servers.LocalNodeID {
+                        continue
+                }
+                if !p.Superuser && !ids[def.ServerID] {
+                        continue
+                }
+                if def.ShowStatus == 0 {
+                        continue
+                }
+                rt := a.remoteRuntime(def.ServerID)
+                if rt == nil {
+                        out[def.ServerID] = fiber.Map{"running": false, "state": string(models.StateStopped)}
+                        continue
+                }
+                out[def.ServerID] = fiber.Map{"running": rt.Running, "state": string(rt.State)}
+        }
         return ok(c, out)
 }
 
 func (a *App) serverStats(c fiber.Ctx) error {
-        sup, _, addr, good := a.loadServer(c, -1)
+        sup, def, nodeID, good := a.loadServer(c, -1)
         if !good {
                 return nil
         }
-        if addr != "" {
-                st, err := a.Cluster.Status(addr, c.Params("id"))
-                if err == nil {
-                        return ok(c, st)
+        if nodeID != "" {
+                rt := a.remoteRuntime(def.ServerID)
+                if rt == nil {
+                        rt = &models.ServerRuntime{ServerID: def.ServerID, State: models.StateStopped, Players: []string{}}
                 }
-                return failMsg(c, 502, "NODE_ERROR", err.Error())
+                return ok(c, fiber.Map{"runtime": rt, "latest": nil, "remote": true})
         }
         rt := sup.Runtime()
         latest := servers.LatestStat(a.depsForStats(), sup.Definition().ServerID)
@@ -663,11 +637,18 @@ func (a *App) serverStats(c fiber.Ctx) error {
 }
 
 func (a *App) serverHistory(c fiber.Ctx) error {
-        sup, _, _, good := a.loadServer(c, -1)
+        sup, def, nodeID, good := a.loadServer(c, -1)
         if !good {
                 return nil
         }
         hours := fiber.Query[int](c, "hours", 24)
+        if nodeID != "" {
+                raw, err := a.Cluster.History(nodeID, def.ServerID, hours)
+                if err != nil {
+                        return failMsg(c, 502, "NODE_ERROR", err.Error())
+                }
+                return ok(c, json.RawMessage(raw))
+        }
         points := servers.History(a.depsForStats(), sup.Definition().ServerID, hours)
         return ok(c, points)
 }
@@ -682,9 +663,11 @@ func (a *App) serverPublic(c fiber.Ctx) error {
         if err != nil || def.ShowStatus == 0 {
                 return fail(c, 404, "SERVER_NOT_FOUND")
         }
-        rt := models.ServerRuntime{}
+        rt := models.ServerRuntime{Players: []string{}}
         if sup, err := a.Registry.Get(serverID); err == nil {
                 rt = sup.Runtime()
+        } else if r := a.remoteRuntime(serverID); r != nil {
+                rt = *r
         }
         return ok(c, fiber.Map{
                 "server_name": def.ServerName, "type": def.Type, "online": rt.Online,
@@ -694,12 +677,30 @@ func (a *App) serverPublic(c fiber.Ctx) error {
 }
 
 func (a *App) serverLogs(c fiber.Ctx) error {
-        sup, _, _, good := a.loadServer(c, authz.ServerLogs)
+        sup, def, nodeID, good := a.loadServer(c, authz.ServerLogs)
         if !good {
                 return nil
         }
+        if nodeID != "" {
+                if !a.nodeOnline(nodeID) {
+                        return fail(c, 502, "NODE_OFFLINE")
+                }
+                if def.LogPath != "" {
+                        if data, err := a.Cluster.ReadFile(nodeID, def.ServerID, def.LogPath, 8<<20); err == nil {
+                                lines := strings.Split(string(data), "\n")
+                                if len(lines) > 700 {
+                                        lines = lines[len(lines)-700:]
+                                }
+                                return ok(c, fiber.Map{"source": "file", "lines": lines})
+                        }
+                }
+                lines, err := a.Cluster.Terminal(nodeID, def.ServerID, 0)
+                if err != nil {
+                        return failMsg(c, 502, "NODE_ERROR", err.Error())
+                }
+                return ok(c, fiber.Map{"source": "terminal", "lines": lines})
+        }
         // log file (if exists) else virtual terminal
-        def := sup.Definition()
         logPath := filepath.Join(def.Path, def.LogPath)
         if data, err := files.New().Read(files.NewGuardOrPanic(def.Path), def.LogPath, 8<<20); err == nil {
                 _ = logPath
@@ -713,12 +714,12 @@ func (a *App) serverLogs(c fiber.Ctx) error {
 }
 
 func (a *App) serverTerminal(c fiber.Ctx) error {
-        sup, _, addr, good := a.loadServer(c, authz.ServerTerminal)
+        sup, def, nodeID, good := a.loadServer(c, authz.ServerTerminal)
         if !good {
                 return nil
         }
-        if addr != "" {
-                lines, err := a.Cluster.Terminal(addr, c.Params("id"), fiber.Query[int](c, "lines", 70))
+        if nodeID != "" {
+                lines, err := a.Cluster.Terminal(nodeID, def.ServerID, fiber.Query[int](c, "lines", 70))
                 if err != nil {
                         return failMsg(c, 502, "NODE_ERROR", err.Error())
                 }
@@ -728,9 +729,16 @@ func (a *App) serverTerminal(c fiber.Ctx) error {
 }
 
 func (a *App) serverPlayers(c fiber.Ctx) error {
-        sup, _, _, good := a.loadServer(c, authz.ServerPlayers)
+        sup, def, nodeID, good := a.loadServer(c, authz.ServerPlayers)
         if !good {
                 return nil
+        }
+        if nodeID != "" {
+                rt := a.remoteRuntime(def.ServerID)
+                if rt == nil {
+                        rt = &models.ServerRuntime{Players: []string{}}
+                }
+                return ok(c, fiber.Map{"online": rt.Online, "max": rt.Max, "players": rt.Players})
         }
         rt := sup.Runtime()
         return ok(c, fiber.Map{
@@ -761,12 +769,73 @@ func (a *App) serverUsers(c fiber.Ctx) error {
 
 // ---------------- config editor endpoints ----------------
 
+// configInfoFor classifies one config file for the editor UI.
+func configInfoFor(file, label, description, editor string) map[string]interface{} {
+        normalized := path.Clean(strings.ReplaceAll(file, `\`, "/"))
+        if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || strings.HasPrefix(normalized, "/") {
+                return nil
+        }
+        n := strings.ToLower(normalized)
+        info := map[string]interface{}{"file": normalized, "mode": "raw", "format": "text"}
+        switch {
+        case n == "server.properties":
+                info["mode"], info["format"] = "visual+raw", "properties"
+        case strings.HasSuffix(n, ".json"):
+                info["format"] = "json"
+        case strings.HasSuffix(n, ".yml") || strings.HasSuffix(n, ".yaml"):
+                info["format"] = "yaml"
+        case strings.HasSuffix(n, ".properties") || strings.HasSuffix(n, ".ini") || strings.HasSuffix(n, ".conf") || strings.HasSuffix(n, ".cfg"):
+                info["format"] = "properties"
+        case strings.HasSuffix(n, ".xml"):
+                info["format"] = "xml"
+        }
+        if label != "" {
+                info["label"] = label
+        }
+        if description != "" {
+                info["description"] = description
+        }
+        if editor == "lines" {
+                info["editor"] = "lines"
+                info["mode"] = "lines"
+        }
+        return info
+}
+
+// isEditableConfigName reports whether a directory entry is worth listing.
+func isEditableConfigName(name string) bool {
+        n := strings.ToLower(name)
+        return n == "server.properties" || strings.HasSuffix(n, ".json") || strings.HasSuffix(n, ".yml") ||
+                strings.HasSuffix(n, ".yaml") || strings.HasSuffix(n, ".properties") || strings.HasSuffix(n, ".ini") ||
+                strings.HasSuffix(n, ".conf") || strings.HasSuffix(n, ".cfg") || strings.HasSuffix(n, ".txt") || strings.HasSuffix(n, ".xml")
+}
+
+func sortConfigList(filesList []map[string]interface{}) []map[string]interface{} {
+        sort.Slice(filesList, func(i, j int) bool {
+                left := strings.ToLower(filesList[i]["file"].(string))
+                right := strings.ToLower(filesList[j]["file"].(string))
+                if left == right {
+                        return filesList[i]["file"].(string) < filesList[j]["file"].(string)
+                }
+                return left < right
+        })
+        return filesList
+}
+
 func (a *App) serverConfigList(c fiber.Ctx) error {
-        sup, _, _, good := a.loadServer(c, authz.ServerConfig)
+        sup, rdef, nodeID, good := a.loadServer(c, authz.ServerConfig)
         if !good {
                 return nil
         }
-        def := sup.Definition()
+        var def gen.Server
+        if nodeID != "" {
+                def = rdef
+        } else {
+                def = sup.Definition()
+        }
+        if nodeID != "" {
+                return a.remoteConfigList(c, nodeID, def)
+        }
         guard, err := files.NewGuard(def.Path)
         if err != nil {
                 return failMsg(c, 500, "CONFIG_LIST_FAILED", err.Error())
@@ -777,46 +846,15 @@ func (a *App) serverConfigList(c fiber.Ctx) error {
         }
         known := map[string]map[string]interface{}{}
         addFile := func(file string, label, description, editor string) {
-                normalized := path.Clean(strings.ReplaceAll(file, `\`, "/"))
-                if normalized == "." || normalized == ".." || strings.HasPrefix(normalized, "../") || strings.HasPrefix(normalized, "/") {
-                        return
+                if info := configInfoFor(file, label, description, editor); info != nil {
+                        known[info["file"].(string)] = info
                 }
-                n := strings.ToLower(normalized)
-                info := map[string]interface{}{"file": normalized, "mode": "raw", "format": "text"}
-                switch {
-                case n == "server.properties":
-                        info["mode"], info["format"] = "visual+raw", "properties"
-                case strings.HasSuffix(n, ".json"):
-                        info["format"] = "json"
-                case strings.HasSuffix(n, ".yml") || strings.HasSuffix(n, ".yaml"):
-                        info["format"] = "yaml"
-                case strings.HasSuffix(n, ".properties") || strings.HasSuffix(n, ".ini") || strings.HasSuffix(n, ".conf") || strings.HasSuffix(n, ".cfg"):
-                        info["format"] = "properties"
-                case strings.HasSuffix(n, ".xml"):
-                        info["format"] = "xml"
-                }
-                if label != "" {
-                        info["label"] = label
-                }
-                if description != "" {
-                        info["description"] = description
-                }
-                if editor == "lines" {
-                        info["editor"] = "lines"
-                        info["mode"] = "lines"
-                }
-                known[normalized] = info
         }
         for _, entry := range entries {
-                if entry.Dir {
+                if entry.Dir || !isEditableConfigName(entry.Name) {
                         continue
                 }
-                n := strings.ToLower(entry.Name)
-                if n == "server.properties" || strings.HasSuffix(n, ".json") || strings.HasSuffix(n, ".yml") ||
-                        strings.HasSuffix(n, ".yaml") || strings.HasSuffix(n, ".properties") || strings.HasSuffix(n, ".ini") ||
-                        strings.HasSuffix(n, ".conf") || strings.HasSuffix(n, ".cfg") || strings.HasSuffix(n, ".txt") || strings.HasSuffix(n, ".xml") {
-                        addFile(entry.Name, "", "", "")
-                }
+                addFile(entry.Name, "", "", "")
         }
 
         game, hasGame, err := a.serverGameManifest(def)
@@ -842,15 +880,7 @@ func (a *App) serverConfigList(c fiber.Ctx) error {
         for _, info := range known {
                 filesList = append(filesList, info)
         }
-        sort.Slice(filesList, func(i, j int) bool {
-                left := strings.ToLower(filesList[i]["file"].(string))
-                right := strings.ToLower(filesList[j]["file"].(string))
-                if left == right {
-                        return filesList[i]["file"].(string) < filesList[j]["file"].(string)
-                }
-                return left < right
-        })
-        return ok(c, filesList)
+        return ok(c, sortConfigList(filesList))
 }
 
 func (a *App) serverGameManifest(def gen.Server) (steamcmd.Game, bool, error) {
@@ -887,22 +917,38 @@ func normalizeConfigFilePath(file string) (string, error) {
 }
 
 func (a *App) serverConfigGet(c fiber.Ctx) error {
-        sup, _, _, good := a.loadServer(c, authz.ServerConfig)
+        sup, rdef, nodeID, good := a.loadServer(c, authz.ServerConfig)
         if !good {
                 return nil
         }
-        def := sup.Definition()
+        var def gen.Server
+        if nodeID != "" {
+                def = rdef
+        } else {
+                def = sup.Definition()
+        }
         file, err := normalizeConfigFilePath(configFileParam(c))
         if err != nil {
                 return fail(c, 400, "TRAVERSAL DETECTED")
         }
-        guard, err := files.NewGuard(def.Path)
-        if err != nil {
-                return failMsg(c, 500, "CONFIG_READ_FAILED", err.Error())
-        }
-        data, err := a.Files.Read(guard, file, 16<<20)
-        if err != nil {
-                return fail(c, 404, "NOT_FOUND")
+        var data []byte
+        if nodeID != "" {
+                if !a.nodeOnline(nodeID) {
+                        return fail(c, 502, "NODE_OFFLINE")
+                }
+                data, err = a.Cluster.ReadFile(nodeID, def.ServerID, file, 16<<20)
+                if err != nil {
+                        return fail(c, 404, "NOT_FOUND")
+                }
+        } else {
+                guard, gerr := files.NewGuard(def.Path)
+                if gerr != nil {
+                        return failMsg(c, 500, "CONFIG_READ_FAILED", gerr.Error())
+                }
+                data, err = a.Files.Read(guard, file, 16<<20)
+                if err != nil {
+                        return fail(c, 404, "NOT_FOUND")
+                }
         }
         mode := c.Query("mode", "raw")
         n := strings.ToLower(file)
@@ -915,11 +961,16 @@ func (a *App) serverConfigGet(c fiber.Ctx) error {
 }
 
 func (a *App) serverConfigPut(c fiber.Ctx) error {
-        sup, _, _, good := a.loadServer(c, authz.ServerConfig)
+        sup, rdef, nodeID, good := a.loadServer(c, authz.ServerConfig)
         if !good {
                 return nil
         }
-        def := sup.Definition()
+        var def gen.Server
+        if nodeID != "" {
+                def = rdef
+        } else {
+                def = sup.Definition()
+        }
         file, err := normalizeConfigFilePath(configFileParam(c))
         if err != nil {
                 return fail(c, 400, "TRAVERSAL DETECTED")
@@ -932,9 +983,29 @@ func (a *App) serverConfigPut(c fiber.Ctx) error {
         if err := parseBody(c, &req); err != nil {
                 return err
         }
-        guard, err := files.NewGuard(def.Path)
-        if err != nil {
-                return failMsg(c, 500, "CONFIG_WRITE_FAILED", err.Error())
+        // read/write functions: node API for remote servers, disk for local
+        readFile := func(name string) ([]byte, error) {
+                if nodeID != "" {
+                        return a.Cluster.ReadFile(nodeID, def.ServerID, name, 16<<20)
+                }
+                guard, gerr := files.NewGuard(def.Path)
+                if gerr != nil {
+                        return nil, gerr
+                }
+                return a.Files.Read(guard, name, 16<<20)
+        }
+        writeFile := func(name string, data []byte) error {
+                if nodeID != "" {
+                        return a.Cluster.WriteFileBytes(nodeID, def.ServerID, name, data)
+                }
+                guard, gerr := files.NewGuard(def.Path)
+                if gerr != nil {
+                        return gerr
+                }
+                return a.Files.Write(guard, name, data)
+        }
+        if nodeID != "" && !a.nodeOnline(nodeID) {
+                return fail(c, 502, "NODE_OFFLINE")
         }
         n := strings.ToLower(file)
         switch req.Mode {
@@ -942,13 +1013,13 @@ func (a *App) serverConfigPut(c fiber.Ctx) error {
                 if !(n == "server.properties" || strings.HasSuffix(n, ".properties")) {
                         return failMsg(c, 400, "INVALID_MODE", "visual mode supports .properties files")
                 }
-                cur, err := a.Files.Read(guard, file, 16<<20)
+                cur, err := readFile(file)
                 if err != nil {
                         return fail(c, 404, "NOT_FOUND")
                 }
                 doc := configedit.ParseProperties(string(cur))
                 configedit.ApplyVisualForm(doc, req.Values)
-                if err := a.Files.Write(guard, file, []byte(configedit.RenderProperties(doc))); err != nil {
+                if err := writeFile(file, []byte(configedit.RenderProperties(doc))); err != nil {
                         return failMsg(c, 500, err.Error(), err.Error())
                 }
                 return ok(c, fiber.Map{"saved": file, "mode": "visual"})
@@ -956,15 +1027,15 @@ func (a *App) serverConfigPut(c fiber.Ctx) error {
                 if err := configedit.ValidateJSON([]byte(req.Content)); err != nil {
                         return failMsg(c, 400, "INVALID_JSON_SCHEMA", err.Error())
                 }
-                if err := a.Files.Write(guard, file, []byte(req.Content)); err != nil {
+                if err := writeFile(file, []byte(req.Content)); err != nil {
                         return failMsg(c, 500, err.Error(), err.Error())
                 }
                 return ok(c, fiber.Map{"saved": file, "mode": "json"})
         default:
-                if err := a.Files.Write(guard, file, []byte(req.Content)); err != nil {
+                if err := writeFile(file, []byte(req.Content)); err != nil {
                         return failMsg(c, 500, err.Error(), err.Error())
                 }
-                a.Log.Audit("api", 0, def.ServerID, "", "Edited config file "+file)
+                a.Log.Audit("api", userIDOf(c), def.ServerID, "", "Edited config file "+file)
                 return ok(c, fiber.Map{"saved": file, "mode": "raw"})
         }
 }
@@ -998,20 +1069,6 @@ func boolI(v interface{}) int64 {
 }
 
 // toStringMap coerces a JSON decoded value into map[string]string.
-func toStringMap(v interface{}) map[string]string {
-        out := map[string]string{}
-        switch x := v.(type) {
-        case map[string]interface{}:
-                for k, val := range x {
-                        if s, ok := val.(string); ok {
-                                out[k] = s
-                        } else {
-                                out[k] = fmt.Sprintf("%v", val)
-                        }
-                }
-        }
-        return out
-}
 
 // jsonMapOf decodes a JSON object column into a map (nil-safe).
 func jsonMapOf(src *string) map[string]string {
@@ -1037,10 +1094,6 @@ func jsonStringsOf(src *string) []string {
 }
 
 // fileOrDirExists reports whether the path resolves (java selection check).
-func fileOrDirExists(p string) bool {
-        _, err := os.Stat(p)
-        return err == nil
-}
 
 func numI(v interface{}, def int64) int64 {
         switch x := v.(type) {
@@ -1058,29 +1111,3 @@ var _ = strconv.Itoa
 var _ = events.EvSendStartReload
 
 // toStringSlice coerces a JSON decoded value into []string.
-func toStringSlice(v interface{}) []string {
-        switch x := v.(type) {
-        case []string:
-                return x
-        case []interface{}:
-                out := make([]string, 0, len(x))
-                for _, item := range x {
-                        if s, ok := item.(string); ok {
-                                out = append(out, s)
-                        } else {
-                                out = append(out, fmt.Sprintf("%v", item))
-                        }
-                }
-                return out
-        case string:
-                if x == "" {
-                        return []string{}
-                }
-                parts := strings.Split(x, ",")
-                for i := range parts {
-                        parts[i] = strings.TrimSpace(parts[i])
-                }
-                return parts
-        }
-        return []string{}
-}

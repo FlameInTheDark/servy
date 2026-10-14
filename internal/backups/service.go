@@ -126,6 +126,71 @@ func (s *Service) Update(b gen.Backup) error {
 		b.Shutdown, b.Before, b.After, b.Default, b.Status, b.Enabled, b.BackupType, b.BackupID)
 }
 
+// EnsureConfig mirrors a config row into the local database so this host can
+// execute or restore it. Configs are authored on the panel, but archives live
+// on the node that owns the server, so the node keeps its own copy of the row
+// with a node-local location.
+func (s *Service) EnsureConfig(b gen.Backup, defaultLocation string) (gen.Backup, error) {
+	if b.BackupID == "" {
+		return b, errors.New("backup_id required")
+	}
+	b.BackupLocation = defaultLocation
+	if existing, err := s.db.GetBackup(b.BackupID); err == nil {
+		// partial metadata (id + server only) must not wipe stored settings
+		b.Created = existing.Created
+		if b.ServerID == "" {
+			b.ServerID = existing.ServerID
+		}
+		if b.BackupName == "" {
+			b.BackupName = existing.BackupName
+		}
+		if b.BackupType == "" {
+			b.BackupType = existing.BackupType
+		}
+		if b.ExcludedDirs == nil {
+			b.ExcludedDirs = existing.ExcludedDirs
+		}
+		if b.MaxBackups == 0 {
+			b.MaxBackups = existing.MaxBackups
+		}
+		if b.Compress == 0 {
+			b.Compress = existing.Compress
+		}
+		if b.Shutdown == 0 {
+			b.Shutdown = existing.Shutdown
+		}
+		if b.Before == nil {
+			b.Before = existing.Before
+		}
+		if b.After == nil {
+			b.After = existing.After
+		}
+		if b.Default == 0 {
+			b.Default = existing.Default
+		}
+		if b.Status == nil {
+			b.Status = existing.Status
+		}
+		if b.Enabled == 0 {
+			b.Enabled = existing.Enabled
+		}
+		if err := s.Update(b); err != nil {
+			return b, err
+		}
+		return s.db.GetBackup(b.BackupID)
+	}
+	if b.BackupType == "" {
+		b.BackupType = "zip_vault"
+	}
+	if b.Enabled == 0 {
+		b.Enabled = 1
+	}
+	if b.ServerID == "" {
+		return b, errors.New("server_id required")
+	}
+	return s.Create(b)
+}
+
 // Delete removes a config (and its files if requested).
 func (s *Service) Delete(backupID string, removeFiles bool) error {
 	b, err := s.db.GetBackup(backupID)
@@ -413,8 +478,14 @@ func (s *Service) Archives(backupID string) ([]ArchiveFile, error) {
 	if err != nil {
 		return nil, ErrNotFound
 	}
+	return ArchivesIn(b.BackupLocation)
+}
+
+// ArchivesIn scans a directory for backup artifacts (used by nodes that store
+// the archives of panel-managed servers).
+func ArchivesIn(location string) ([]ArchiveFile, error) {
 	out := []ArchiveFile{}
-	entries, err := os.ReadDir(b.BackupLocation)
+	entries, err := os.ReadDir(location)
 	if err != nil {
 		return out, nil
 	}
@@ -428,7 +499,7 @@ func (s *Service) Archives(backupID string) ([]ArchiveFile, error) {
 			t = "snapshot"
 		}
 		out = append(out, ArchiveFile{Name: e.Name(), Size: info.Size(), Modified: info.ModTime().UTC(),
-			Path: filepath.Join(b.BackupLocation, e.Name()), Type: t})
+			Path: filepath.Join(location, e.Name()), Type: t})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Modified.After(out[j].Modified) })
 	return out, nil

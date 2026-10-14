@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
   Server, Plus, Search, Play, Square, RotateCw, Users, Cpu, MemoryStick,
-  Network, Boxes, Clock, Loader2,
+  Network, Boxes, Clock, Loader2, WifiOff,
 } from "lucide-react";
 import { useApi } from "@/hooks/useApi";
 import { api, ServerDef, realtime } from "@/api/client";
@@ -61,10 +61,16 @@ function fmtMem(bytes: number) {
 
 /* ------------------------------ server card ------------------------------- */
 
-function ServerCard({ s, onAction }: { s: ServerDef; onAction: (a: "start" | "stop" | "restart") => void }) {
+function ServerCard({ s, node, onAction }: {
+  s: ServerDef;
+  node?: { name: string; online: boolean };
+  onAction: (a: "start" | "stop" | "restart") => void;
+}) {
   const state = effectiveState(s);
   const busy = state === "starting" || state === "stopping" || state === "importing" || state === "updating";
   const uptime = uptimeOf(s);
+  const remote = !!s.node_id && s.node_id !== "local";
+  const nodeOffline = remote && node?.online === false;
 
   return (
     <div className="group rounded-xl border bg-card p-4 transition-all hover:border-border hover:shadow-md">
@@ -115,10 +121,16 @@ function ServerCard({ s, onAction }: { s: ServerDef; onAction: (a: "start" | "st
 
       <div className="mt-3 flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-          {s.node_id && s.node_id !== "local" && (
-            <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5">
-              <Network className="h-3 w-3" /> {s.node_id}
-            </span>
+          {remote && (
+            nodeOffline ? (
+              <span className="inline-flex items-center gap-1 rounded bg-destructive/10 px-1.5 py-0.5 text-destructive">
+                <WifiOff className="h-3 w-3" /> {node?.name || s.node_id} offline
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5">
+                <Network className="h-3 w-3" /> {node?.name || s.node_id}
+              </span>
+            )
           )}
           {s.version && <span className="truncate">{s.version}</span>}
         </div>
@@ -137,7 +149,14 @@ function ServerCard({ s, onAction }: { s: ServerDef; onAction: (a: "start" | "st
               </Button>
             </>
           ) : (
-            <Button variant="ghost" size="sm" className="h-8 gap-1.5 text-success hover:text-success" onClick={() => onAction("start")}>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-8 gap-1.5 text-success hover:text-success"
+              disabled={nodeOffline}
+              title={nodeOffline ? "The node hosting this server is offline" : undefined}
+              onClick={() => onAction("start")}
+            >
               <Play className="h-3.5 w-3.5" /> Start
             </Button>
           )}
@@ -151,9 +170,30 @@ function ServerCard({ s, onAction }: { s: ServerDef; onAction: (a: "start" | "st
 
 export default function ServersListPage() {
   const nav = useNavigate();
+  const [params, setParams] = useSearchParams();
   const [q, setQ] = useState("");
   const [filter, setFilter] = useState("all");
+  const [nodeFilter, setNodeFilter] = useState(params.get("node") || "all");
   const { data: servers, loading, refetch } = useApi<ServerDef[]>("/servers", { pollMs: 8000 });
+  const { data: cluster } = useApi<{ nodes: any[] }>("/panel/nodes", { pollMs: 20000 });
+
+  const nodeMap = useMemo(() => {
+    const map: Record<string, { name: string; online: boolean }> = {};
+    for (const n of cluster?.nodes || []) map[n.node_id] = { name: n.name, online: !!n.online };
+    return map;
+  }, [cluster]);
+
+  useEffect(() => {
+    setNodeFilter(params.get("node") || "all");
+  }, [params]);
+
+  const pickNode = (id: string) => {
+    setNodeFilter(id);
+    const next = new URLSearchParams(params);
+    if (id === "all") next.delete("node");
+    else next.set("node", id);
+    setParams(next, { replace: true });
+  };
 
   // live refresh on lifecycle events
   useEffect(() => {
@@ -176,6 +216,8 @@ export default function ServersListPage() {
 
   const filtered = (servers || []).filter((s) => {
     if (q && !s.server_name.toLowerCase().includes(q.toLowerCase())) return false;
+    if (nodeFilter === "local" && s.node_id && s.node_id !== "local") return false;
+    if (nodeFilter !== "all" && nodeFilter !== "local" && s.node_id !== nodeFilter) return false;
     const st = effectiveState(s);
     if (filter === "running") return s.running;
     if (filter === "stopped") return !s.running && !s.importing && !s.updating;
@@ -251,6 +293,26 @@ export default function ServersListPage() {
                   </button>
                 ))}
               </div>
+              {(cluster?.nodes?.length ?? 0) > 1 && (
+                <div className="flex gap-1 rounded-lg border p-0.5">
+                  {[
+                    { id: "all", label: "All nodes" },
+                    { id: "local", label: "This panel" },
+                    ...(cluster?.nodes || []).filter((n: any) => !n.local).map((n: any) => ({ id: n.node_id, label: n.name })),
+                  ].map((n) => (
+                    <button
+                      key={n.id}
+                      onClick={() => pickNode(n.id)}
+                      className={cn(
+                        "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                        nodeFilter === n.id ? "bg-accent text-foreground" : "text-muted-foreground hover:text-foreground"
+                      )}
+                    >
+                      {n.label}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             {filtered.length === 0 ? (
@@ -260,7 +322,12 @@ export default function ServersListPage() {
             ) : (
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 {filtered.map((s) => (
-                  <ServerCard key={s.server_id} s={s} onAction={(a) => act(s.server_id, a)} />
+                  <ServerCard
+                    key={s.server_id}
+                    s={s}
+                    node={s.node_id ? nodeMap[s.node_id] : undefined}
+                    onAction={(a) => act(s.server_id, a)}
+                  />
                 ))}
               </div>
             )}
