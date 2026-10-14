@@ -442,13 +442,19 @@ func (s *Service) UpdateServerConfig(ctx context.Context, req *pb.NodeRequest) (
 	if err := json.Unmarshal([]byte(req.Payload), &patch); err != nil {
 		return &pb.NodeReply{Ok: false, Message: "invalid patch: " + err.Error()}, nil
 	}
-	if err := s.deps.Registry.UpdateConfig(req.ServerId, func(def *gen.Server) {
-		servers.ApplyServerPatch(def, patch)
-	}); err != nil {
-		return &pb.NodeReply{Ok: false, Message: err.Error()}, nil
-	}
 	def, err := s.deps.DB.GetServer(req.ServerId)
 	if err != nil {
+		return &pb.NodeReply{Ok: false, Message: "server not found: " + err.Error()}, nil
+	}
+	// Validate on a copy first: a rejected launch parameter (bad password
+	// length, unknown option, unusable memory value) must not be
+	// half-persisted on the node.
+	if err := servers.ApplyServerPatch(&def, patch); err != nil {
+		return &pb.NodeReply{Ok: false, Message: err.Error()}, nil
+	}
+	if err := s.deps.Registry.UpdateConfig(req.ServerId, func(current *gen.Server) {
+		*current = def
+	}); err != nil {
 		return &pb.NodeReply{Ok: false, Message: err.Error()}, nil
 	}
 	raw, _ := json.Marshal(def)

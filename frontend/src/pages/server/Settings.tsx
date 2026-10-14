@@ -1,12 +1,99 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Save, Database, Cpu } from "lucide-react";
+import { Save, Database, Cpu, Eye, EyeOff, RotateCcw, SlidersHorizontal, CircleHelp, MemoryStick, Network } from "lucide-react";
 import { PATCH, GET, ServerDef } from "@/api/client";
-import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Switch } from "@/components/ui/primitives";
-import { SimpleSelect } from "@/components/ui/overlays";
+import { Button, Card, CardContent, CardHeader, CardTitle, Input, Label, Switch, Badge } from "@/components/ui/primitives";
+import { SimpleSelect, Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/overlays";
 import { useApi } from "@/hooks/useApi";
+import { cn } from "@/lib/utils";
 
 interface ShellOption { id: string; label: string; path?: string; available: boolean; platform: string }
+
+/* ------------------------- startup / launch parameters --------------------- */
+
+interface LaunchOption {
+  key: string;
+  label: string;
+  description?: string;
+  type: "text" | "password" | "number" | "boolean" | "select";
+  flag?: string;
+  value: string;
+  default?: string;
+  required?: boolean;
+  min?: number;
+  max?: number;
+  min_length?: number;
+  max_length?: number;
+  options?: { value: string; label: string }[];
+  automatic?: string;   // server_name | port | query_port | save_dir
+  using_default?: boolean;
+}
+
+interface LaunchOptionsPayload {
+  server_id: string;
+  editable: boolean;
+  kind?: string;
+  argv?: string[];
+  command?: string;
+  remote?: boolean;
+  node_id?: string;
+  node_name?: string;
+  node_online?: boolean;
+  steam?: {
+    game: { name: string; app_id?: number; platform?: string; slug?: string; stop_command?: string };
+    options: LaunchOption[];
+    argv: string[];
+  };
+  memory?: { min: string; max: string };
+}
+
+function HelpHint({ text }: { text: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button type="button" aria-label="More information"
+          className="text-muted-foreground/70 transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-none">
+          <CircleHelp className="h-3.5 w-3.5" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-[280px] leading-relaxed">{text}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function shellQuote(argv: string[]): string {
+  return argv
+    .map((arg) => (/^[A-Za-z0-9_./:=+-]+$/.test(arg) ? arg : `"${arg.replace(/"/g, '\\"')}"`))
+    .join(" ");
+}
+
+/** Password field with a reveal toggle (values are stored per server). */
+function SecretInput({ id, value, onChange, placeholder }: {
+  id?: string; value: string; onChange: (v: string) => void; placeholder?: string;
+}) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="relative">
+      <Input
+        id={id}
+        type={visible ? "text" : "password"}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        autoComplete="new-password"
+        className="pr-9 font-mono text-xs"
+      />
+      <button
+        type="button"
+        onClick={() => setVisible((v) => !v)}
+        aria-label={visible ? "Hide value" : "Show value"}
+        className="absolute right-2 top-2 text-muted-foreground transition-colors hover:text-foreground"
+      >
+        {visible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+      </button>
+    </div>
+  );
+}
 
 interface JavaInstall {
   path: string;
@@ -46,6 +133,59 @@ export default function Settings({ server, onUpdate }: { server: ServerDef; onUp
     docker_autoremove: server.docker_autoremove || false,
   });
   const [busy, setBusy] = useState(false);
+  // parameters collected during creation (Steam launch options, -Xms/-Xmx)
+  const { data: launch, refetch: refetchLaunch } = useApi<LaunchOptionsPayload>(`/servers/${server.server_id}/launch-options`);
+  const [launchBusy, setLaunchBusy] = useState(false);
+  const [launchError, setLaunchError] = useState("");
+  const [steamValues, setSteamValues] = useState<Record<string, string>>({});
+  const [memoryValues, setMemoryValues] = useState({ min: "", max: "" });
+
+  useEffect(() => {
+    if (!launch) return;
+    const values: Record<string, string> = {};
+    for (const option of launch.steam?.options || []) {
+      if (option.automatic) continue;
+      values[option.key] = option.value ?? "";
+    }
+    setSteamValues(values);
+    setMemoryValues({ min: launch.memory?.min || "", max: launch.memory?.max || "" });
+  }, [launch]);
+
+  const launchDirty = (() => {
+    if (!launch) return false;
+    for (const option of launch.steam?.options || []) {
+      if (option.automatic) continue;
+      if ((steamValues[option.key] ?? "") !== (option.value ?? "")) return true;
+    }
+    if (launch.memory && (memoryValues.min !== launch.memory.min || memoryValues.max !== launch.memory.max)) return true;
+    return false;
+  })();
+
+  const saveLaunch = async () => {
+    if (!launch) return;
+    setLaunchBusy(true);
+    setLaunchError("");
+    try {
+      const payload: Record<string, unknown> = {};
+      if (launch.steam) payload.steam_options = steamValues;
+      if (launch.memory) {
+        payload.min_mem = memoryValues.min;
+        payload.max_mem = memoryValues.max;
+      }
+      await PATCH(`/servers/${server.server_id}`, payload);
+      toast.success("Startup parameters saved");
+      await refetchLaunch();
+      onUpdate();
+    } catch (e: any) {
+      setLaunchError(e.message || "Could not save the parameters");
+      toast.error(e.message);
+    } finally {
+      setLaunchBusy(false);
+    }
+  };
+
+  const resetOption = (option: LaunchOption) => setSteamValues((v) => ({ ...v, [option.key]: "" }));
+
   const { data: javaData } = useApi<{ installs: JavaInstall[]; minecraft_java_requirements: { range: string; major: number }[] }>("/panel/java");
   const { data: dockerData } = useApi<{ available: boolean; host?: string; version?: string }>("/panel/docker");
   const { data: shellsData } = useApi<{ default: string; platform: string; shells: ShellOption[] }>("/panel/shells");
@@ -313,6 +453,174 @@ export default function Settings({ server, onUpdate }: { server: ServerDef; onUp
       <div className="flex justify-end">
         <Button onClick={save} disabled={busy}><Save /> Save settings</Button>
       </div>
+
+      {/* values picked when the server was created — editable afterwards */}
+      {launch && (launch.steam || launch.memory) && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <SlidersHorizontal className="h-4 w-4" /> Startup parameters
+            </CardTitle>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <span>
+                {launch.steam
+                  ? "Launch options for this game, as filled in during creation."
+                  : "Java memory flags of the execution command."}
+              </span>
+              {launch.remote && (
+                <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5">
+                  <Network className="h-3 w-3" /> applied on {launch.node_name || launch.node_id}
+                  {launch.node_online === false && <span className="text-destructive"> · offline</span>}
+                </span>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {launch.steam && (
+              <>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-medium">{launch.steam.game.name}</span>
+                  {launch.steam.game.app_id ? <Badge variant="secondary">#{launch.steam.game.app_id}</Badge> : null}
+                  {launch.steam.game.platform && <Badge variant="muted">{launch.steam.game.platform}</Badge>}
+                </div>
+
+                {(launch.steam.options || []).some((o) => o.automatic) && (
+                  <div className="space-y-1.5">
+                    <div className="text-sm font-medium">Filled in automatically</div>
+                    {(launch.steam.options || []).filter((o) => o.automatic).map((option) => (
+                      <div key={option.key} className="flex items-center justify-between gap-3 rounded-md border bg-muted/30 px-3 py-2 text-sm">
+                        <span className="flex items-center gap-1.5">
+                          {option.label}
+                          <Badge variant="muted" className="text-[10px]">{(option.automatic || "").replace(/_/g, " ")}</Badge>
+                        </span>
+                        <span className="truncate font-mono text-xs text-muted-foreground">{option.value}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  {(launch.steam.options || []).filter((o) => !o.automatic).map((option) => {
+                    const value = steamValues[option.key] ?? "";
+                    const canReset = !option.required && !option.using_default;
+                    return (
+                      <div key={option.key} className="space-y-1.5">
+                        <div className="flex items-center gap-1.5">
+                          <Label htmlFor={`launch-${option.key}`}>{option.label}</Label>
+                          {option.required && <span className="text-destructive">*</span>}
+                          {option.description && <HelpHint text={option.description} />}
+                          {option.using_default && value && <Badge variant="muted" className="text-[10px]">default</Badge>}
+                          {canReset && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <button
+                                  type="button"
+                                  aria-label={`Reset ${option.label}`}
+                                  onClick={() => resetOption(option)}
+                                  className="text-muted-foreground/70 transition-colors hover:text-foreground"
+                                >
+                                  <RotateCcw className="h-3.5 w-3.5" />
+                                </button>
+                              </TooltipTrigger>
+                              <TooltipContent>Clear the value and fall back to the game default ({option.default || "none"}).</TooltipContent>
+                            </Tooltip>
+                          )}
+                        </div>
+                        {option.type === "boolean" ? (
+                          <div className="flex min-h-9 items-center gap-2">
+                            <Switch
+                              id={`launch-${option.key}`}
+                              checked={value === "true"}
+                              onCheckedChange={(checked) => setSteamValues((v) => ({ ...v, [option.key]: checked ? "true" : "false" }))}
+                            />
+                            <span className="text-xs text-muted-foreground">{option.flag ? `${option.flag} ${value === "true" ? "on" : "off"}` : value}</span>
+                          </div>
+                        ) : option.type === "select" ? (
+                          <SimpleSelect
+                            value={value}
+                            onValueChange={(v) => setSteamValues((prev) => ({ ...prev, [option.key]: v }))}
+                            placeholder={option.required ? "Choose an option…" : "Use game default"}
+                            options={(option.options || []).map((choice) => ({ value: choice.value, label: choice.label }))}
+                          />
+                        ) : option.type === "password" ? (
+                          <SecretInput
+                            id={`launch-${option.key}`}
+                            value={value}
+                            onChange={(v) => setSteamValues((prev) => ({ ...prev, [option.key]: v }))}
+                          />
+                        ) : (
+                          <Input
+                            id={`launch-${option.key}`}
+                            type={option.type === "number" ? "number" : "text"}
+                            value={value}
+                            min={option.min}
+                            max={option.max}
+                            minLength={option.min_length}
+                            maxLength={option.max_length}
+                            onChange={(e) => setSteamValues((prev) => ({ ...prev, [option.key]: e.target.value }))}
+                            className="font-mono text-xs"
+                          />
+                        )}
+                        {option.description && <p className="text-xs text-muted-foreground">{option.description}</p>}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {(launch.steam.argv || []).length > 0 && (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center gap-1.5 text-sm font-medium">
+                      Launch arguments
+                      <HelpHint text="The exact argument list the game is started with. Automatic values (port, name, save directory) come from the server settings above." />
+                    </div>
+                    <div className="overflow-x-auto rounded-md border bg-muted/30 p-3 font-mono text-xs text-muted-foreground">
+                      {shellQuote(launch.steam.argv || [])}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+
+            {launch.memory && (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <MemoryStick className="h-4 w-4 text-primary" /> Java memory
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <Label htmlFor="launch-min-mem">Min memory (-Xms)</Label>
+                      <HelpHint text="Initial heap. Sizes look like 512M, 2G or 1024." />
+                    </div>
+                    <Input id="launch-min-mem" value={memoryValues.min} onChange={(e) => setMemoryValues((v) => ({ ...v, min: e.target.value }))} className="font-mono text-xs" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <Label htmlFor="launch-max-mem">Max memory (-Xmx)</Label>
+                      <HelpHint text="Upper heap limit. Give the JVM as much as the machine can spare — modpacks often need 4–8 GB." />
+                    </div>
+                    <Input id="launch-max-mem" value={memoryValues.max} onChange={(e) => setMemoryValues((v) => ({ ...v, max: e.target.value }))} className="font-mono text-xs" />
+                  </div>
+                </div>
+                {launch.command && (
+                  <div className="overflow-x-auto rounded-md border bg-muted/30 p-3 font-mono text-xs text-muted-foreground">{launch.command}</div>
+                )}
+              </div>
+            )}
+
+            {launchError && <p role="alert" className="text-sm text-destructive">{launchError}</p>}
+
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-muted-foreground">
+                {launch.steam ? "Changes apply the next time the server starts." : "Applied at the next start."}
+              </p>
+              <Button onClick={saveLaunch} disabled={launchBusy || !launchDirty}>
+                <Save /> {launchBusy ? "Saving…" : "Save parameters"}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <Card className="border-destructive/30">
         <CardHeader><CardTitle className="text-base text-destructive flex items-center gap-2">

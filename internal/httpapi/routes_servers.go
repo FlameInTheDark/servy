@@ -3,6 +3,7 @@ package httpapi
 import (
         "encoding/json"
         "path"
+        "regexp"
         "path/filepath"
         "sort"
         "strconv"
@@ -53,6 +54,7 @@ func (a *App) mountServers(api fiber.Router) {
         api.Put("/servers/:id/config-file", a.serverConfigPut)
         api.Get("/servers/:id/config/:file", a.serverConfigGet)
         api.Put("/servers/:id/config/:file", a.serverConfigPut)
+        api.Get("/servers/:id/launch-options", a.serverLaunchOptions)
 
         // import/upload handled under files group; node placement
         api.Get("/servers/:id/users", a.serverUsers)
@@ -298,7 +300,9 @@ func (a *App) patchServer(c fiber.Ctx) error {
 }
 
 // applyServerPatch lives in the servers package (shared with cluster agents).
-func applyServerPatch(def *gen.Server, patch map[string]interface{}) { servers.ApplyServerPatch(def, patch) }
+func applyServerPatch(def *gen.Server, patch map[string]interface{}) error {
+        return servers.ApplyServerPatch(def, patch)
+}
 
 func (a *App) patchServerConfig(c fiber.Ctx) error {
         sup, def, nodeID, good := a.loadServer(c, authz.ServerConfig)
@@ -313,6 +317,13 @@ func (a *App) patchServerConfig(c fiber.Ctx) error {
                 if !a.nodeOnline(nodeID) {
                         return fail(c, 502, "NODE_OFFLINE")
                 }
+                // The panel mirrors the node's server row, so bad launch
+                // parameters fail fast with 400 instead of a node round-trip.
+                // The node validates again — it stays the source of truth.
+                check := def
+                if err := applyServerPatch(&check, patch); err != nil {
+                        return failMsg(c, 400, err.Error(), err.Error())
+                }
                 raw, err := a.Cluster.UpdateConfig(nodeID, def.ServerID, patch)
                 if err != nil {
                         return failMsg(c, 502, "NODE_ERROR", err.Error())
@@ -326,11 +337,17 @@ func (a *App) patchServerConfig(c fiber.Ctx) error {
                 view["node_id"] = nodeID
                 return ok(c, view)
         }
-        if err := a.Registry.UpdateConfig(sup.Definition().ServerID, func(def *gen.Server) {
-                applyServerPatch(def, patch)
+        // Patch a copy first: a rejected launch parameter (bad password length,
+        // unknown option, unusable memory value) must not be half-persisted.
+        if err := applyServerPatch(&def, patch); err != nil {
+                return failMsg(c, 400, err.Error(), err.Error())
+        }
+        if err := a.Registry.UpdateConfig(def.ServerID, func(current *gen.Server) {
+                *current = def
         }); err != nil {
                 return failMsg(c, 400, err.Error(), err.Error())
         }
+        _ = sup
         updated, _ := a.DB.GetServer(sup.Definition().ServerID)
         rt := sup.Runtime()
         return ok(c, a.serverView(updated, &rt))
@@ -820,6 +837,145 @@ func sortConfigList(filesList []map[string]interface{}) []map[string]interface{}
                 return left < right
         })
         return filesList
+}
+
+// launchOptionView is one editable manifest launch parameter of a Steam
+// server, resolved for display in the server view.
+type launchOptionView struct {
+        Key          string                       `json:"key"`
+        Label        string                       `json:"label"`
+        Description  string                       `json:"description,omitempty"`
+        Type         string                       `json:"type"`
+        Flag         string                       `json:"flag,omitempty"`
+        Value        string                       `json:"value"`
+        Default      string                       `json:"default,omitempty"`
+        Required     bool                         `json:"required,omitempty"`
+        Min          *int                         `json:"min,omitempty"`
+        Max          *int                         `json:"max,omitempty"`
+        MinLength    *int                         `json:"min_length,omitempty"`
+        MaxLength    *int                         `json:"max_length,omitempty"`
+        Options      []steamcmd.LaunchOptionValue `json:"options,omitempty"`
+        Automatic    string                       `json:"automatic,omitempty"`
+        UsingDefault bool                         `json:"using_default,omitempty"`
+}
+
+var (
+        xmsValuePattern = regexp.MustCompile(`(?i)-Xms([0-9]+[KMG]?)`)
+        xmxValuePattern = regexp.MustCompile(`(?i)-Xmx([0-9]+[KMG]?)`)
+)
+
+// serverLaunchOptions returns the parameters that were collected while the
+// server was created (Steam launch options, -Xms/-Xmx memory flags) so the
+// server view can show and change them later.
+func (a *App) serverLaunchOptions(c fiber.Ctx) error {
+        sup, def, nodeID, good := a.loadServer(c, authz.ServerConfig)
+        if !good {
+                return nil
+        }
+        _ = sup
+        view := buildLaunchOptions(def)
+        if nodeID != "" {
+                view["remote"] = true
+                view["node_id"] = nodeID
+                view["node_online"] = a.nodeOnline(nodeID)
+                if state, ok := a.Nodes.Get(nodeID); ok {
+                        view["node_name"] = state.Name
+                }
+        }
+        return ok(c, view)
+}
+
+// buildLaunchOptions is the pure part of the launch-options view: it resolves
+// the frozen game manifest and the memory flags of one server row.
+func buildLaunchOptions(def gen.Server) fiber.Map {
+        view := fiber.Map{
+                "server_id": def.ServerID,
+                "editable":  false,
+                "argv":      []string{},
+                "command":   def.ExecutionCommand,
+        }
+        if snapshot, err := steamcmd.GameSnapshotFromDefinitions(def.Definitions); err == nil && snapshot != nil {
+                context := launchContextFor(def, snapshot)
+                options := make([]launchOptionView, 0, len(snapshot.Game.LaunchOptions))
+                for _, option := range snapshot.Game.LaunchOptions {
+                        item := launchOptionView{
+                                Key: option.Key, Label: option.Label, Description: option.Description,
+                                Type: option.Type, Flag: option.Flag, Default: option.Default,
+                                Required: option.Required, Min: option.Min, Max: option.Max,
+                                MinLength: option.MinLength, MaxLength: option.MaxLength, Options: option.Options,
+                        }
+                        if option.Source != "" {
+                                item.Automatic = option.Source
+                                if value, err := steamcmd.SourceValue(option.Source, context); err == nil {
+                                        item.Value = value
+                                }
+                        } else {
+                                item.Value = snapshot.LaunchOptions[option.Key]
+                                item.UsingDefault = item.Value == ""
+                                if item.UsingDefault {
+                                        item.Value = option.Default
+                                }
+                        }
+                        options = append(options, item)
+                }
+                view["editable"] = true
+                view["kind"] = "steam"
+                view["steam"] = fiber.Map{
+                        "game": fiber.Map{
+                                "name": snapshot.Game.Name, "app_id": snapshot.Game.AppID,
+                                "platform": snapshot.Game.Platform, "slug": snapshot.Game.Slug,
+                                "stop_command": snapshot.Game.StopCommand,
+                        },
+                        "options": options,
+                        "argv":    resolvedArgv(snapshot, context),
+                }
+        }
+        if min, max, ok := memoryFlagsOf(def.ExecutionCommand); ok {
+                view["editable"] = true
+                view["memory"] = fiber.Map{"min": min, "max": max}
+        }
+        return view
+}
+
+// serverGameSnapshot returns the frozen game manifest of a server, if any.
+func (a *App) serverGameSnapshot(def gen.Server) (*steamcmd.GameSnapshot, error) {
+        return steamcmd.GameSnapshotFromDefinitions(def.Definitions)
+}
+
+func launchContextFor(def gen.Server, snapshot *steamcmd.GameSnapshot) steamcmd.LaunchContext {
+        port := int(def.ServerPort)
+        queryPort := snapshot.Game.QueryPort
+        if queryPort == 0 {
+                queryPort = port + 1
+        }
+        return steamcmd.LaunchContext{
+                ServerName: def.ServerName, Port: port, QueryPort: queryPort,
+                SaveDir: filepath.Join(def.Path, "saves"),
+        }
+}
+
+// resolvedArgv is the launch argument vector a start would use right now.
+func resolvedArgv(snapshot *steamcmd.GameSnapshot, context steamcmd.LaunchContext) []string {
+        argv, _, err := steamcmd.ResolveLaunchOptions(snapshot.Game.LaunchOptions, snapshot.LaunchOptions, context)
+        if err != nil {
+                return []string{}
+        }
+        return argv
+}
+
+// memoryFlagsOf extracts -Xms/-Xmx from an execution command.
+func memoryFlagsOf(command string) (string, string, bool) {
+        min, max := "", ""
+        if match := xmsValuePattern.FindStringSubmatch(command); match != nil {
+                min = match[1]
+        }
+        if match := xmxValuePattern.FindStringSubmatch(command); match != nil {
+                max = match[1]
+        }
+        if min == "" && max == "" {
+                return "", "", false
+        }
+        return min, max, true
 }
 
 func (a *App) serverConfigList(c fiber.Ctx) error {

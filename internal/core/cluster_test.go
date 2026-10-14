@@ -411,6 +411,66 @@ func TestClusterNodeJoinAndRemoteServerLifecycle(t *testing.T) {
 		t.Fatalf("imported remote server missing from the panel list: %d %s", code, raw)
 	}
 
+	// ---- creation-stage values stay editable afterwards ----
+	code, env, raw = cl.do("POST", "/servers", map[string]interface{}{
+		"create_type": "raw_exec", "name": "tweak-me", "type": "custom",
+		"executable": "server.jar", "execution_command": "java -Xms512M -Xmx1024M -jar server.jar nogui",
+		"stop_command": "stop", "port": 25603, "node": creds.NodeID,
+	})
+	if code != 200 {
+		t.Fatalf("remote create for editing: %d %s", code, raw)
+	}
+	tweakID := env["data"].(map[string]interface{})["server_id"].(string)
+
+	// raw_exec servers expose no Steam launch parameters and no memory editor
+	// until the command actually carries the flags
+	code, env, raw = cl.do("GET", fmt.Sprintf("/servers/%s/launch-options", tweakID), nil)
+	if code != 200 {
+		t.Fatalf("launch options: %d %s", code, raw)
+	}
+	memory, ok := env["data"].(map[string]interface{})["memory"].(map[string]interface{})
+	if !ok || memory["min"] != "512M" || memory["max"] != "1024M" {
+		t.Fatalf("memory flags not reported: %s", raw)
+	}
+	if env["data"].(map[string]interface{})["remote"] != true {
+		t.Fatalf("launch options must be marked remote: %s", raw)
+	}
+
+	// changing them goes through the node and is mirrored back to the panel row
+	code, _, raw = cl.do("PATCH", fmt.Sprintf("/servers/%s", tweakID), map[string]interface{}{
+		"min_mem": "2G", "max_mem": "4G",
+	})
+	if code != 200 {
+		t.Fatalf("memory patch: %d %s", code, raw)
+	}
+	nodeTweak, err := node.DB.GetServer(tweakID)
+	if err != nil {
+		t.Fatalf("node row: %v", err)
+	}
+	if !strings.Contains(nodeTweak.ExecutionCommand, "-Xms2G") || !strings.Contains(nodeTweak.ExecutionCommand, "-Xmx4G") {
+		t.Fatalf("node command not updated: %q", nodeTweak.ExecutionCommand)
+	}
+	code, env, raw = cl.do("GET", fmt.Sprintf("/servers/%s", tweakID), nil)
+	if code != 200 || !strings.Contains(raw, "-Xms2G") {
+		t.Fatalf("panel row did not mirror the node command: %d %s", code, raw)
+	}
+
+	// rejected values never reach the node
+	code, env, raw = cl.do("PATCH", fmt.Sprintf("/servers/%s", tweakID), map[string]interface{}{"min_mem": "lots"})
+	if code != 400 {
+		t.Fatalf("invalid memory value accepted: %d %s", code, raw)
+	}
+	code, env, raw = cl.do("PATCH", fmt.Sprintf("/servers/%s", tweakID), map[string]interface{}{
+		"steam_options": map[string]interface{}{"password": "secret"},
+	})
+	if code != 400 || !strings.Contains(raw, "no editable Steam launch parameters") {
+		t.Fatalf("steam options accepted on a raw server: %d %s", code, raw)
+	}
+	nodeTweak, _ = node.DB.GetServer(tweakID)
+	if !strings.Contains(nodeTweak.ExecutionCommand, "-Xms2G") {
+		t.Fatalf("rejected patch changed the node command: %q", nodeTweak.ExecutionCommand)
+	}
+
 	// ---- removing a node is guarded while it hosts servers ----
 	code, env, raw = cl.do("POST", "/servers", map[string]interface{}{
 		"create_type": "raw_exec", "name": "keep-me", "type": "custom",
