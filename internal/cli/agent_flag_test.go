@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"io"
 	"reflect"
 	"testing"
 
@@ -89,35 +91,65 @@ func TestAgentModeArgs(t *testing.T) {
 	}
 }
 
-// The rewritten line must actually select the agent subcommand.
-func TestAgentModeArgsSelectsAgentCommand(t *testing.T) {
+// The rewritten line must be understood by the real parser, not just look
+// right: `servy --agent run --ticket T` has to end up in the `agent run`
+// action with the ticket bound to its flag. The action of `agent run` is
+// swapped for a recorder so nothing tries to reach a panel.
+func TestAgentModeArgsReachesAgentRun(t *testing.T) {
+	root := Root()
+	agentCmd := findChild(root, "agent")
+	if agentCmd == nil {
+		t.Fatal("the command tree has no `agent` command")
+	}
+	runCmd := findChild(agentCmd, "run")
+	if runCmd == nil {
+		t.Fatal("the command tree has no `agent run` command")
+	}
+
+	var gotTicket string
+	runCmd.Action = func(ctx context.Context, cmd *clipkg.Command) error {
+		gotTicket = cmd.String("ticket")
+		return nil
+	}
+
+	root.Writer = io.Discard
+	root.ErrWriter = io.Discard
 	args := AgentModeArgs([]string{"servy", "--agent", "run", "--ticket", "T"})
-	cmd, rest := lookupSubcommand(Root(), args[1:])
-	if cmd == nil || cmd.Name != "agent" {
-		t.Fatalf("expected the `agent` command, got %v (rest %q)", cmd, rest)
+	if err := root.Run(context.Background(), args); err != nil {
+		t.Fatalf("running %q failed: %v", args, err)
+	}
+	if gotTicket != "T" {
+		t.Fatalf("`agent run` was not reached: ticket = %q (args %q)", gotTicket, args)
 	}
 }
 
-// lookupSubcommand resolves the first non-flag token against the command tree,
-// mirroring how the CLI library picks a subcommand (root --data/-d takes a
-// value, everything else is a boolean flag).
-func lookupSubcommand(root *clipkg.Command, args []string) (*clipkg.Command, []string) {
-	current := root
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if len(arg) > 0 && arg[0] == '-' {
-			if arg == "--data" || arg == "-d" {
-				i++
-			}
-			continue
-		}
-		next := findChild(current, arg)
-		if next == nil {
-			return current, args[i:]
-		}
-		current = next
+// And the rewrite must not hijack the panel: `servy serve` still lands on the
+// serve command and leaves the agent flag false.
+func TestAgentModeArgsKeepsThePanel(t *testing.T) {
+	root := Root()
+	serveCmd := findChild(root, "serve")
+	if serveCmd == nil {
+		t.Fatal("the command tree has no `serve` command")
 	}
-	return current, nil
+
+	called := false
+	serveCmd.Action = func(ctx context.Context, cmd *clipkg.Command) error {
+		called = true
+		if cmd.Bool("agent") {
+			t.Fatal("--agent should be false when it is not passed")
+		}
+		return nil
+	}
+
+	root.Writer = io.Discard
+	root.ErrWriter = io.Discard
+	args := AgentModeArgs([]string{"servy", "serve"})
+	if err := root.Run(context.Background(), args); err != nil {
+		t.Fatalf("running %q failed: %v", args, err)
+	}
+	if !called {
+		t.Fatalf("serve was not reached (args %q)", args)
+	}
 }
 
 func findChild(cmd *clipkg.Command, name string) *clipkg.Command {
