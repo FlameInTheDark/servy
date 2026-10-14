@@ -56,19 +56,32 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # The tag is rebuilt from the version because the tag format is fixed in
-      # .releaserc.json ("v${version}"); prerelease versions carry a "-".
+      # semantic-release reports the tag it created; the version-based fallback
+      # covers the (theoretical) case where the output comes back empty.
       - name: Resolve the published tag
         id: tag
         if: steps.semantic.outputs.new_release_published == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.semantic.outputs.new_release_git_tag }}
+          RELEASE_VERSION: ${{ steps.semantic.outputs.new_release_version }}
+          RELEASE_CHANNEL: ${{ steps.semantic.outputs.new_release_channel }}
         run: |
-          TAG="v${{ steps.semantic.outputs.new_release_version }}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          case "$TAG" in
-            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
-            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          TAG="${RELEASE_TAG}"
+          if [ -z "${TAG}" ] || [ "${TAG}" = "undefined" ]; then
+            TAG="v${RELEASE_VERSION}"   # .releaserc.json sets tagFormat=v${version}
+          fi
+          PRERELEASE=false
+          if [ -n "${RELEASE_CHANNEL}" ] && [ "${RELEASE_CHANNEL}" != "undefined" ]; then
+            PRERELEASE=true             # released on the beta channel
+          fi
+          case "${RELEASE_VERSION}" in
+            *-*) PRERELEASE=true ;;     # 1.2.0-beta.1 and friends
           esac
-          echo "Published $TAG"
+          {
+            echo "tag=${TAG}"
+            echo "prerelease=${PRERELEASE}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Published ${TAG} (prerelease=${PRERELEASE})"
 
   binaries:
     name: ${{ matrix.goos }}-${{ matrix.goarch }}
