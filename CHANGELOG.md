@@ -1,3 +1,19 @@
+# [1.4.0](https://github.com/FlameInTheDark/servy/compare/v1.3.0...v1.4.0) (2026-10-14)
+
+
+### Bug Fixes
+
+* **docker:** align the exposed node API port and the image license label ([b91279f](https://github.com/FlameInTheDark/servy/commit/b91279fea8c3eb3ef87d28e569666dfde9c3dbc8))
+
+
+### Features
+
+* **backups:** pick which folders a backup covers ([da84934](https://github.com/FlameInTheDark/servy/commit/da849341a45c03a2fc0b64151bc4f226ff79a080))
+* **backups:** store backups in different storage systems, namespaced per cluster ([b87e8cd](https://github.com/FlameInTheDark/servy/commit/b87e8cd90d97d9f5f3438ad7a7df963a62759e18))
+* **cli:** run the node agent from the main binary ([b88ec53](https://github.com/FlameInTheDark/servy/commit/b88ec5333849ead7c506f1d28595d6f730324cd7))
+* **cluster:** ticket-based node join and full remote server management ([b4398d3](https://github.com/FlameInTheDark/servy/commit/b4398d3714b66a06e8dd1f678d01e875289e8edd))
+* **panel:** rework server wizard, launch options and server view ([f9a6bbc](https://github.com/FlameInTheDark/servy/commit/f9a6bbc52abd6252d730f4996410d0a642af78ef))
+
 # [1.3.0](https://github.com/FlameInTheDark/servy/compare/v1.2.0...v1.3.0) (2026-10-14)
 
 
