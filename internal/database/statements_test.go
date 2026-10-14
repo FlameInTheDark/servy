@@ -68,12 +68,16 @@ func TestBackupStorageStatements(t *testing.T) {
 func TestBackupStatements(t *testing.T) {
 	q, _ := newTestQueries(t)
 	createTestServer(t, q, "srv-1")
-	row, err := q.CreateBackup("b1", "now", "nightly", "/tmp/backups", nil, 5, "srv-1", 1, 1, nil, nil, 1, nil, 1, "zip_vault", "st1")
+	included := "world,plugins"
+	row, err := q.CreateBackup("b1", "now", "nightly", "/tmp/backups", nil, &included, 5, "srv-1", 1, 1, nil, nil, 1, nil, 1, "zip_vault", "st1")
 	if err != nil {
 		t.Fatalf("CreateBackup: %v", err)
 	}
 	if row.StorageID != "st1" || row.Default != 1 {
 		t.Fatalf("row = %+v", row)
+	}
+	if row.IncludedDirs == nil || *row.IncludedDirs != included {
+		t.Fatalf("included_dirs did not round-trip: %+v", row.IncludedDirs)
 	}
 	if _, err := q.GetBackup("b1"); err != nil {
 		t.Fatalf("GetBackup: %v", err)
@@ -81,8 +85,11 @@ func TestBackupStatements(t *testing.T) {
 	if _, err := q.GetDefaultBackup("srv-1"); err != nil {
 		t.Fatalf("GetDefaultBackup: %v", err)
 	}
-	if err := q.UpdateBackup("nightly", "/tmp/backups", nil, 3, 1, 1, nil, nil, 1, nil, 1, "zip_vault", "st2", "b1"); err != nil {
+	if err := q.UpdateBackup("nightly", "/tmp/backups", nil, nil, 3, 1, 1, nil, nil, 1, nil, 1, "zip_vault", "st2", "b1"); err != nil {
 		t.Fatalf("UpdateBackup: %v", err)
+	}
+	if row, err := q.GetBackup("b1"); err != nil || row.IncludedDirs != nil {
+		t.Fatalf("UpdateBackup left included_dirs behind: %+v %v", row.IncludedDirs, err)
 	}
 	status := "ok"
 	if err := q.SetBackupStatus(&status, "b1"); err != nil {

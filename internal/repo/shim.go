@@ -50,8 +50,8 @@ func (q *Q) CreateAPIKey(Name string, Created string, UserID int64, ServerPermis
 	return q.Queries.CreateAPIKey(context.Background(), gen.CreateAPIKeyParams{Name: Name, Created: Created, UserID: UserID, ServerPermissions: ServerPermissions, PanelPermissions: PanelPermissions, FullAccess: FullAccess, TokenHash: TokenHash, TokenPrefix: TokenPrefix})
 }
 
-func (q *Q) CreateBackup(BackupID string, Created string, BackupName string, BackupLocation string, ExcludedDirs *string, MaxBackups int64, ServerID string, Compress int64, Shutdown int64, Before *string, After *string, Default int64, Status *string, Enabled int64, BackupType string, StorageID string) (gen.Backup, error) {
-	return q.Queries.CreateBackup(context.Background(), gen.CreateBackupParams{BackupID: BackupID, Created: Created, BackupName: BackupName, BackupLocation: BackupLocation, ExcludedDirs: ExcludedDirs, MaxBackups: MaxBackups, ServerID: ServerID, Compress: Compress, Shutdown: Shutdown, Before: Before, After: After, Default: Default, Status: Status, Enabled: Enabled, BackupType: BackupType, StorageID: StorageID})
+func (q *Q) CreateBackup(BackupID string, Created string, BackupName string, BackupLocation string, ExcludedDirs *string, IncludedDirs *string, MaxBackups int64, ServerID string, Compress int64, Shutdown int64, Before *string, After *string, Default int64, Status *string, Enabled int64, BackupType string, StorageID string) (gen.Backup, error) {
+	return q.Queries.CreateBackup(context.Background(), gen.CreateBackupParams{BackupID: BackupID, Created: Created, BackupName: BackupName, BackupLocation: BackupLocation, ExcludedDirs: ExcludedDirs, IncludedDirs: IncludedDirs, MaxBackups: MaxBackups, ServerID: ServerID, Compress: Compress, Shutdown: Shutdown, Before: Before, After: After, Default: Default, Status: Status, Enabled: Enabled, BackupType: BackupType, StorageID: StorageID})
 }
 
 func (q *Q) CreateBackupStorage(StorageID string, Created string, Name string, Kind string, Prefix string, Settings string, Enabled int64, Default int64, ClusterID string) (gen.BackupStorage, error) {
@@ -478,8 +478,8 @@ func (q *Q) UpdateAPIKey(Name string, ServerPermissions string, PanelPermissions
 	return q.Queries.UpdateAPIKey(context.Background(), gen.UpdateAPIKeyParams{Name: Name, ServerPermissions: ServerPermissions, PanelPermissions: PanelPermissions, FullAccess: FullAccess, TokenID: TokenID})
 }
 
-func (q *Q) UpdateBackup(BackupName string, BackupLocation string, ExcludedDirs *string, MaxBackups int64, Compress int64, Shutdown int64, Before *string, After *string, Default int64, Status *string, Enabled int64, BackupType string, StorageID string, BackupID string) error {
-	return q.Queries.UpdateBackup(context.Background(), gen.UpdateBackupParams{BackupName: BackupName, BackupLocation: BackupLocation, ExcludedDirs: ExcludedDirs, MaxBackups: MaxBackups, Compress: Compress, Shutdown: Shutdown, Before: Before, After: After, Default: Default, Status: Status, Enabled: Enabled, BackupType: BackupType, StorageID: StorageID, BackupID: BackupID})
+func (q *Q) UpdateBackup(BackupName string, BackupLocation string, ExcludedDirs *string, IncludedDirs *string, MaxBackups int64, Compress int64, Shutdown int64, Before *string, After *string, Default int64, Status *string, Enabled int64, BackupType string, StorageID string, BackupID string) error {
+	return q.Queries.UpdateBackup(context.Background(), gen.UpdateBackupParams{BackupName: BackupName, BackupLocation: BackupLocation, ExcludedDirs: ExcludedDirs, IncludedDirs: IncludedDirs, MaxBackups: MaxBackups, Compress: Compress, Shutdown: Shutdown, Before: Before, After: After, Default: Default, Status: Status, Enabled: Enabled, BackupType: BackupType, StorageID: StorageID, BackupID: BackupID})
 }
 
 func (q *Q) UpdateBackupStorage(Name string, Kind string, Prefix string, Settings string, Enabled int64, Default int64, ClusterID string, StorageID string) error {

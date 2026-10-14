@@ -43,6 +43,7 @@ type Backup struct {
 	Enabled        int64
 	BackupType     string
 	StorageID      string
+	IncludedDirs   *string
 }
 
 type BackupStorage struct {

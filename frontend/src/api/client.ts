@@ -245,6 +245,8 @@ export interface BackupConfig {
   created: string;
   backup_name: string;
   backup_location: string;
+  /** Folders the backup covers. Empty = the whole server folder. */
+  included_dirs: string[];
   excluded_dirs: string[];
   max_backups: number;
   server_id: string;
@@ -258,6 +260,19 @@ export interface BackupConfig {
   /** Storage destination the archives are uploaded to (empty = local only). */
   storage_id?: string;
   status: Record<string, any>;
+}
+
+/** What a backup of one server can cover, as the panel sees it. */
+export interface ServerBackupFolders {
+  server_id: string;
+  /** Folders the game manifest declares (empty for non-Steam servers). */
+  manifest_dirs: string[];
+  /** Where those folders come from, e.g. the game name. */
+  manifest_source: string;
+  /** Directories that exist in the server folder right now. */
+  dirs: string[];
+  /** Set when the server folder could not be listed (node offline, …). */
+  folders_error?: string;
 }
 
 /** One field of a storage destination form; the panel drives the shape. */

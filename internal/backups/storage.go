@@ -299,7 +299,7 @@ func (s *Service) DeleteStorage(storageID string, force bool) error {
 		if err != nil {
 			continue
 		}
-		if err := s.db.UpdateBackup(b.BackupName, b.BackupLocation, b.ExcludedDirs, b.MaxBackups,
+		if err := s.db.UpdateBackup(b.BackupName, b.BackupLocation, b.ExcludedDirs, b.IncludedDirs, b.MaxBackups,
 			b.Compress, b.Shutdown, b.Before, b.After, b.Default, b.Status, b.Enabled, b.BackupType,
 			"", item.BackupID); err != nil {
 			return err

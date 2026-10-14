@@ -1086,7 +1086,7 @@ func (a *App) applyManifest(c fiber.Ctx) error {
 		DockerPorts: manifest.DockerPorts, DockerBinds: manifest.DockerBinds,
 		DockerNetwork: manifest.DockerNetwork, DockerWorkdir: manifest.DockerWorkdir,
 		DockerAutoremove: manifest.DockerAutoremove, AutoStart: manifest.AutoStart && !deferAutoStart,
-		CrashDetection: manifest.CrashDetection,
+		CrashDetection: manifest.CrashDetection, BackupDirs: manifest.BackupDirs,
 	}
 	archivePath := ""
 	if manifest.CreateType == creation.CreateImportZip {

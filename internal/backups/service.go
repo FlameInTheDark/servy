@@ -26,6 +26,7 @@ import (
 	"github.com/FlameInTheDark/servy/internal/logging"
 	"github.com/FlameInTheDark/servy/internal/repo/gen"
 	"github.com/FlameInTheDark/servy/internal/servers"
+	"github.com/FlameInTheDark/servy/internal/steamcmd"
 )
 
 // ErrNotFound / taxonomy.
@@ -59,6 +60,7 @@ type ConfigView struct {
 	BackupName     string                 `json:"backup_name"`
 	BackupLocation string                 `json:"backup_location"`
 	ExcludedDirs   []string               `json:"excluded_dirs"`
+	IncludedDirs   []string               `json:"included_dirs"`
 	MaxBackups     int64                  `json:"max_backups"`
 	ServerID       string                 `json:"server_id"`
 	Compress       bool                   `json:"compress"`
@@ -78,15 +80,17 @@ func (s *Service) View(b gen.Backup) ConfigView {
 		BackupID: b.BackupID, Created: b.Created, BackupName: b.BackupName,
 		BackupLocation: b.BackupLocation, MaxBackups: b.MaxBackups, ServerID: b.ServerID,
 		Compress: b.Compress == 1, Shutdown: b.Shutdown == 1, Default: b.Default == 1,
-		Enabled: b.Enabled == 1, BackupType: b.BackupType, StorageID: b.StorageID, ExcludedDirs: []string{},
+		Enabled: b.Enabled == 1, BackupType: b.BackupType, StorageID: b.StorageID,
+		ExcludedDirs: []string{}, IncludedDirs: []string{},
 		Status: map[string]interface{}{},
 	}
-	if b.ExcludedDirs != nil {
-		for _, d := range strings.Split(*b.ExcludedDirs, ",") {
-			if d = strings.TrimSpace(d); d != "" {
-				v.ExcludedDirs = append(v.ExcludedDirs, d)
-			}
-		}
+	v.ExcludedDirs = splitCSV(b.ExcludedDirs)
+	v.IncludedDirs = splitCSV(b.IncludedDirs)
+	if v.ExcludedDirs == nil {
+		v.ExcludedDirs = []string{}
+	}
+	if v.IncludedDirs == nil {
+		v.IncludedDirs = []string{}
 	}
 	if b.Before != nil {
 		v.Before = *b.Before
@@ -109,7 +113,7 @@ func (s *Service) Create(b gen.Backup) (gen.Backup, error) {
 	if b.BackupType == "" {
 		b.BackupType = "zip_vault"
 	}
-	return s.db.CreateBackup(b.BackupID, b.Created, b.BackupName, b.BackupLocation, b.ExcludedDirs,
+	return s.db.CreateBackup(b.BackupID, b.Created, b.BackupName, b.BackupLocation, b.ExcludedDirs, b.IncludedDirs,
 		b.MaxBackups, b.ServerID, b.Compress, b.Shutdown, b.Before, b.After, b.Default, b.Status, b.Enabled, b.BackupType, b.StorageID)
 }
 
@@ -130,7 +134,7 @@ func (s *Service) Get(backupID string) (gen.Backup, error) {
 
 // Update mutates a config.
 func (s *Service) Update(b gen.Backup) error {
-	return s.db.UpdateBackup(b.BackupName, b.BackupLocation, b.ExcludedDirs, b.MaxBackups, b.Compress,
+	return s.db.UpdateBackup(b.BackupName, b.BackupLocation, b.ExcludedDirs, b.IncludedDirs, b.MaxBackups, b.Compress,
 		b.Shutdown, b.Before, b.After, b.Default, b.Status, b.Enabled, b.BackupType, b.StorageID, b.BackupID)
 }
 
@@ -157,6 +161,9 @@ func (s *Service) EnsureConfig(b gen.Backup, defaultLocation string) (gen.Backup
 		}
 		if b.ExcludedDirs == nil {
 			b.ExcludedDirs = existing.ExcludedDirs
+		}
+		if b.IncludedDirs == nil {
+			b.IncludedDirs = existing.IncludedDirs
 		}
 		if b.MaxBackups == 0 {
 			b.MaxBackups = existing.MaxBackups
@@ -340,7 +347,7 @@ func (s *Service) runZipVault(b gen.Backup, def gen.Server) error {
 	stamp := time.Now().UTC().Format("2006-01-02_15-04-05")
 	name := fmt.Sprintf("%s_%s.zip", def.ServerID, stamp)
 	outPath := filepath.Join(b.BackupLocation, name)
-	excludes := splitCSV(b.ExcludedDirs)
+	scope := newBackupScope(b)
 
 	f, err := os.Create(outPath)
 	if err != nil {
@@ -359,21 +366,20 @@ func (s *Service) runZipVault(b gen.Backup, def gen.Server) error {
 		if rel == "." {
 			return nil
 		}
-		for _, ex := range excludes {
-			if matched, _ := filepath.Match(ex, rel); matched {
-				if info.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
+		if scope.skips(rel) {
+			if info.IsDir() {
+				return filepath.SkipDir
 			}
-			if strings.HasPrefix(rel, ex+string(os.PathSeparator)) {
-				if info.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
+			return nil
 		}
 		if info.IsDir() {
+			if !scope.covers(rel) {
+				// no selected folder lives below this directory
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !scope.picks(rel) {
 			return nil
 		}
 		return addZipEntry(zw, p, rel)
@@ -394,22 +400,26 @@ func (s *Service) runSnapshot(b gen.Backup, def gen.Server) error {
 	stamp := time.Now().UTC().Format("2006-01-02_15-04-05")
 	repoDir := filepath.Join(b.BackupLocation, "repo")
 	manifestPath := filepath.Join(b.BackupLocation, fmt.Sprintf("%s_%s.snap.json", def.ServerID, stamp))
-	excludes := splitCSV(b.ExcludedDirs)
+	scope := newBackupScope(b)
 
 	entries := []snapEntry{}
 	root := def.Path
 	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, p)
 		if rel == "." {
 			return nil
 		}
-		for _, ex := range excludes {
-			if matched, _ := filepath.Match(ex, rel); matched || strings.HasPrefix(rel, ex+string(os.PathSeparator)) {
-				return nil
+		if info.IsDir() {
+			if scope.skips(rel) || !scope.covers(rel) {
+				return filepath.SkipDir
 			}
+			return nil
+		}
+		if scope.skips(rel) || !scope.picks(rel) {
+			return nil
 		}
 		hash, size, err := storeByHash(p, repoDir)
 		if err != nil {
@@ -874,12 +884,98 @@ func (s *Service) EnsureDefault(def gen.Server, backupRoot string) error {
 	}
 	loc := filepath.Join(backupRoot, servers.SanitizeServerName(def.ServerName))
 	excluded := ".servy,server.properties"
+	// The game manifest decides which folders matter (Steam catalog
+	// backup_dirs / creation recipe backup_dirs). Without a list the backup
+	// keeps covering the whole server directory, like before.
+	var included *string
+	if dirs := steamcmd.BackupDirsFromDefinitions(def.Definitions); len(dirs) > 0 {
+		joined := strings.Join(dirs, ",")
+		included = &joined
+	}
 	_, err := s.Create(gen.Backup{
-		BackupName: "Default Backup", BackupLocation: loc, ExcludedDirs: &excluded,
+		BackupName: "Default Backup", BackupLocation: loc, ExcludedDirs: &excluded, IncludedDirs: included,
 		MaxBackups: 0, ServerID: def.ServerID, Compress: 1, Shutdown: 0,
 		Default: 1, Enabled: 1, BackupType: "zip_vault",
 	})
 	return err
+}
+
+// backupScope decides what one backup picks up. A non-empty included_dirs
+// restricts the walk to the folders selected in the server's backup settings
+// (pre-filled from the game manifest) and everything below them;
+// excluded_dirs subtracts from the result. An empty included_dirs keeps the
+// historical behaviour: the whole server directory.
+type backupScope struct {
+	included []string
+	excluded []string
+}
+
+func newBackupScope(b gen.Backup) backupScope {
+	return backupScope{included: splitCSV(b.IncludedDirs), excluded: splitCSV(b.ExcludedDirs)}
+}
+
+// covers reports whether a directory can contain selected folders. When it
+// cannot, the walk prunes it instead of descending into gigabytes of game
+// files that are not part of the backup.
+func (s backupScope) covers(rel string) bool {
+	if len(s.included) == 0 {
+		return true
+	}
+	rel = slashPath(rel)
+	for _, in := range s.included {
+		in = slashPath(in)
+		if in == "" {
+			continue
+		}
+		if rel == in || strings.HasPrefix(rel, in+"/") || strings.HasPrefix(in, rel+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// picks reports whether a file belongs to the backup.
+func (s backupScope) picks(rel string) bool {
+	if len(s.included) == 0 {
+		return true
+	}
+	for _, in := range s.included {
+		if withinDir(rel, in) {
+			return true
+		}
+	}
+	return false
+}
+
+// skips reports whether the user removed a path from the scope.
+func (s backupScope) skips(rel string) bool {
+	for _, ex := range s.excluded {
+		if matched, _ := filepath.Match(slashPath(ex), slashPath(rel)); matched {
+			return true
+		}
+		if withinDir(rel, ex) {
+			return true
+		}
+	}
+	return false
+}
+
+// withinDir reports whether rel is dir itself or lives below it.
+func withinDir(rel, dir string) bool {
+	rel = slashPath(rel)
+	dir = slashPath(dir)
+	if dir == "" {
+		return false
+	}
+	return rel == dir || strings.HasPrefix(rel, dir+"/")
+}
+
+// slashPath normalizes one folder-list entry for comparison: forward slashes on
+// every platform, so a list written on Windows ("saves\world") also matches the
+// files of a Linux server, and a stray separator never hides a folder from the
+// scope.
+func slashPath(p string) string {
+	return strings.TrimSuffix(strings.ReplaceAll(strings.TrimSpace(p), `\`, "/"), "/")
 }
 
 func splitCSV(s *string) []string {

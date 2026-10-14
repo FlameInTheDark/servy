@@ -41,6 +41,7 @@ type creationRequest struct {
 	DockerNetwork    string            `json:"docker_network"`
 	DockerWorkdir    string            `json:"docker_workdir"`
 	DockerAutoremove bool              `json:"docker_autoremove"`
+	BackupDirs       []string          `json:"backup_dirs"`
 	Roles            []int64 `json:"roles"`
 	AutoStart        bool    `json:"auto_start"`
 	CrashDetection   bool    `json:"crash_detection"`
@@ -59,6 +60,7 @@ func (r creationRequest) toCreationRequest() creation.Request {
 		DockerImage: r.DockerImage, DockerEnv: r.DockerEnv, DockerPorts: r.DockerPorts,
 		DockerBinds: r.DockerBinds, DockerNetwork: r.DockerNetwork,
 		DockerWorkdir: r.DockerWorkdir, DockerAutoremove: r.DockerAutoremove,
+		BackupDirs: r.BackupDirs,
 	}
 }
 

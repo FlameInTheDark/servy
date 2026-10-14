@@ -1,7 +1,7 @@
 -- name: CreateBackup :one
-INSERT INTO backups (backup_id, created, backup_name, backup_location, excluded_dirs, max_backups, server_id,
+INSERT INTO backups (backup_id, created, backup_name, backup_location, excluded_dirs, included_dirs, max_backups, server_id,
   compress, shutdown, before, after, "default", status, enabled, backup_type)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
 -- name: GetBackup :one
@@ -14,7 +14,7 @@ SELECT * FROM backups WHERE server_id = ? ORDER BY created;
 SELECT * FROM backups WHERE server_id = ? AND "default" = 1 LIMIT 1;
 
 -- name: UpdateBackup :exec
-UPDATE backups SET backup_name = ?, backup_location = ?, excluded_dirs = ?, max_backups = ?, compress = ?,
+UPDATE backups SET backup_name = ?, backup_location = ?, excluded_dirs = ?, included_dirs = ?, max_backups = ?, compress = ?,
   shutdown = ?, "before" = ?, "after" = ?, "default" = ?, status = ?, enabled = ?, backup_type = ?,
   storage_id = ? WHERE backup_id = ?;
 

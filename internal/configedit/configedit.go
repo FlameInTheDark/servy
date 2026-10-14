@@ -356,9 +356,10 @@ type Manifest struct {
 	Shell            string                 `json:"shell,omitempty"`
 	AutoStart        bool                   `json:"auto_start,omitempty"`
 	CrashDetection   bool                   `json:"crash_detection,omitempty"`
-	Files            map[string]string      `json:"files,omitempty"`  // relative path -> HTTPS URL or literal file contents
-	Config           map[string]string      `json:"config,omitempty"` // server.properties overrides
-	Env              map[string]interface{} `json:"env,omitempty"`    // env.json seed
+	BackupDirs       []string               `json:"backup_dirs,omitempty"` // folders a backup covers; empty = whole server folder
+	Files            map[string]string      `json:"files,omitempty"`       // relative path -> HTTPS URL or literal file contents
+	Config           map[string]string      `json:"config,omitempty"`      // server.properties overrides
+	Env              map[string]interface{} `json:"env,omitempty"`         // env.json seed
 }
 
 var manifestIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$`)
@@ -488,6 +489,25 @@ func (r *Registry) ParseManifest(data []byte) (*Manifest, error) {
 	if len(m.SteamOptions) > 0 && m.CreateType != "steam_game" {
 		return nil, fmt.Errorf("steam_options are only valid for steam_game recipes")
 	}
+
+	if len(m.BackupDirs) > 256 {
+		return nil, fmt.Errorf("manifest may define at most 256 backup folders")
+	}
+	cleaned := make([]string, 0, len(m.BackupDirs))
+	for _, dir := range m.BackupDirs {
+		value := strings.TrimSpace(dir)
+		if value == "" {
+			return nil, fmt.Errorf("backup_dirs contains an empty folder")
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			return nil, fmt.Errorf("backup_dirs folder %q contains a line break", dir)
+		}
+		if strings.Contains(value, ",") {
+			return nil, fmt.Errorf("backup_dirs folder %q contains a comma; use one entry per folder", dir)
+		}
+		cleaned = append(cleaned, value)
+	}
+	m.BackupDirs = cleaned
 
 	if len(m.Files) > 128 {
 		return nil, fmt.Errorf("manifest may define at most 128 files")

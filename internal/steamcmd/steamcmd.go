@@ -132,6 +132,11 @@ type GameSnapshot struct {
 // definitions column. The envelope leaves room for other per-server metadata.
 type ServerDefinitions struct {
 	SteamGame *GameSnapshot `json:"steam_game,omitempty"`
+	// BackupDirs is the folder list of a creation recipe (configedit.Manifest).
+	// Steam servers carry theirs inside the game snapshot instead.
+	BackupDirs []string `json:"backup_dirs,omitempty"`
+	// BackupDirsName is the recipe that declared them, for the UI label.
+	BackupDirsName string `json:"backup_dirs_name,omitempty"`
 }
 
 // ExposedPort is one host port a containerized server publishes.
