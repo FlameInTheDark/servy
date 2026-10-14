@@ -16,23 +16,27 @@ In `Panel settings → Cluster` (or `config.yaml`) set:
 
 ```yaml
 grpc_enabled: true
-grpc_port: "50052"
+grpc_port: 5055      # this is the default; change it if the port is taken
 ```
+
+Only the **panel** uses this port. Each node listens on its own node API port
+(`--grpc-port`, default `50052`) which the panel dials.
 
 Restart the panel. On boot it prints the address nodes should join:
 
 ```
-Cluster node API on :50052 — add machines under Nodes → Add node
+Cluster node API on :5055 — add machines under Nodes → Add node
 ```
 
-Then open `Nodes` in the UI.
+Then open `Nodes` in the UI. If the panel runs in Docker, publish this port
+too — see [`docker.md`](docker.md#running-a-node-in-docker).
 
 ## 2. Add the node
 
 1. Click **Add node**. The dialog shows a one-time command such as:
 
    ```
-   servy agent run --panel panel.example.com:50052 --ticket 7f3c… --name build-box
+   servy agent run --panel panel.example.com:5055 --ticket 7f3c… --name build-box
    ```
 
    Copy it (or copy just the ticket).
@@ -44,7 +48,7 @@ Then open `Nodes` in the UI.
    ```
    Joined as node "build-box" (n-9f21c4). Credentials stored in …
    Servy agent 3.6.0 — node n-9f21c4 (build-box)
-   Node API on :50052 | panel panel.example.com:50052 | servers in /srv/servy/servers
+   Node API on :50052 | panel panel.example.com:5055 | servers in /srv/servy/servers
    ```
 
 3. The node appears in `Nodes` as soon as it registers — no second step in the

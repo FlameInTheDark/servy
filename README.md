@@ -50,6 +50,7 @@ docker compose up -d
 
 The panel image (`ghcr.io/flameinthedark/servy`) includes all Java runtimes (8/11/17/21) and SteamCMD.
 Mount `/var/run/docker.sock` to let Servy spawn sibling containers for SteamCMD games.
+Full compose reference, volumes and ports: [`docs/docker.md`](docs/docker.md).
 
 > **Windows-only games** (Abiotic Factor, V Rising, etc.) use the companion `servy-wine` image (Wine + SteamCMD).
 > See `docker/steamcmd-wine/README.md` for details.
@@ -63,8 +64,8 @@ Mount `/var/run/docker.sock` to let Servy spawn sibling containers for SteamCMD 
 - **Java Version Manager** — Auto-detects JVMs (8/11/17/21/25), per-server selection, MC version to Java matrix hints; Docker image ships all runtimes
 - **Real-time Terminal** — xterm.js over WebSocket, ANSI color, command queue, keyword highlights, multiple shell choices (bash, sh, cmd, pwsh, git-bash)
 - **File Manager** — Browse, edit, upload, zip/unzip, download — traversal-proof PathGuard on every path
-- **Backups** — Zip vault (compressed, retention) + snapshots (deduplicated), pre/post hooks, stop-before-backup, restore and browse
-- **Schedules** — Interval, cron, daily, one-shot; reaction children on start/stop/crash/backup with delays
+- **Backups** — Zip vault (compressed, retention) + snapshots (deduplicated), stop-before-backup, before/after console commands, restore and browse; archives can be uploaded to **S3/FTP/FTPS/WebDAV** destinations with per-panel retention ([docs](docs/backups.md))
+- **Schedules** — Every N minutes/hours/days, cron expressions, one-time runs; reaction children on start/stop/crash/backup with delays
 - **Monitoring** — Host + per-server stats (adaptive sampling), Java/Bedrock pings, player tracking, Prometheus `/metrics`
 - **Webhooks** — Discord, Slack, Mattermost, Teams, Generic — templated bodies, per-event triggers
 - **Auth & RBAC** — Argon2id, JWT sessions, TOTP 2FA + recovery codes, API keys (hashed at rest), 8-bit permission masks, quantity limits
