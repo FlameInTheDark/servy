@@ -1,4 +1,4 @@
-# Backup Storage Destinations
+# Backups
 
 By default a backup archive stays on the machine that runs the server. A
 **storage destination** is a place a panel additionally uploads those archives
@@ -7,6 +7,37 @@ wiped disk does not take the backups with it.
 
 Destinations are configured once per panel (`Panel settings → Backups`), then
 picked per backup config in the server's `Backups` tab.
+
+## What a backup covers
+
+A backup archives the server's own directory. Which parts of it are picked up is
+set per backup config in the server's `Backups` tab:
+
+- **No folders selected** (the default, and how every config created before this
+  option existed behaves): the whole server directory is archived.
+- **Folders selected**: those folders and everything inside them are archived —
+  plus any single files you add, e.g. `serverconfig.xml`. Everything else is
+  skipped, which is what keeps a 40 GB game install out of every archive.
+- **Excluded dirs** are subtracted on top of that selection, e.g. `logs,cache`.
+  Wildcards are allowed (`*.log`).
+
+The picker lists the folders that exist in the server directory *and* the folders
+this server's manifest declared for backups (`backup_dirs` in a
+[SteamCMD game manifest](manifests.md#steamcmd-game-manifests) or in a
+[creation recipe](manifests.md#backup-folders)). Manifest folders are shown as
+their own group and are the ones Servy pre-selects when it creates the default
+config for a new server. For a server that runs on another node, the folders are
+listed through that node.
+
+Example — a Valheim server where only the world and the admin list matter:
+
+| Setting | Value |
+| --- | --- |
+| Backup folders | `saves`, `saves/adminlist.txt` |
+| Excluded dirs | `saves/cache` |
+
+Restores put the archived folders back into the server directory, so a partial
+backup only ever replaces the files it contains.
 
 ## Supported destinations
 
@@ -80,6 +111,30 @@ Deleting a backup config with `files=true` removes the config's archives from
 the host **and** from the destination namespace of that server.
 
 ## API
+
+Backup configs (the per-server settings above):
+
+```
+GET    /api/v1/servers/:id/backups               list backup configs
+POST   /api/v1/servers/:id/backups               create one
+GET    /api/v1/servers/:id/backup-folders        picker data: manifest_dirs + dirs
+PATCH  /api/v1/backups/backup/:id                update
+```
+
+`POST`/`PATCH` take `included_dirs` (the folders to archive, relative to the
+server directory; `[]` = the whole directory) and `excluded_dirs` (subtracted on
+top). On `PATCH`, a field that is left out keeps its current value while an empty
+array clears it. `GET /servers/:id/backup-folders` answers what the tab shows:
+
+```json
+{
+  "manifest_dirs": ["saves", "serverconfig.xml"],
+  "manifest_source": "7 Days to Die",
+  "dirs": ["saves", "logs", "Mods", "serverconfig.xml"]
+}
+```
+
+Storage destinations:
 
 ```
 GET    /api/v1/panel/backup-storages             list destinations

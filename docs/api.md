@@ -221,6 +221,7 @@ Every path is resolved inside the server directory; escapes answer
 | Method & path | Permission | Purpose |
 | --- | --- | --- |
 | `GET/POST /servers/{id}/backups` | `BACKUP` | List / create backup configs |
+| `GET /servers/{id}/backup-folders` | `BACKUP` | Folder picker data: manifest folders + directories in the server dir |
 | `GET/PATCH/DELETE /backups/backup/{backup_id}` | `BACKUP` | Config detail, edit, delete (`?files=true` deletes archives too) |
 | `POST /backups/backup/{backup_id}/run` | `BACKUP` | Run a backup now |
 | `GET /backups/backup/{backup_id}/archives` | `BACKUP` | Archives with their location (host / storage) |
@@ -240,6 +241,7 @@ Backup config bodies (`POST /servers/{id}/backups`):
 {
   "name": "nightly",
   "backup_type": "zip_vault",   // zip_vault | snapshot
+  "included_dirs": ["saves"],   // folders to archive; [] = the whole server dir
   "excluded_dirs": ["logs"],
   "max_backups": 7,             // used when no storage destination is set
   "compress": true,
@@ -251,6 +253,13 @@ Backup config bodies (`POST /servers/{id}/backups`):
   "storage_id": "…"             // omit = default destination, "" = host only
 }
 ```
+
+On `PATCH /backups/backup/{id}`, `included_dirs` and `excluded_dirs` keep their
+current value when the field is left out, and are cleared when an empty array is
+sent. `GET /servers/{id}/backup-folders` answers what the tab's folder picker
+shows: the folders the server's manifest declared (`manifest_dirs`, with
+`manifest_source` naming the game or recipe) and the directories that exist in
+the server directory right now (`dirs`).
 
 Schedule bodies (`POST /servers/{id}/tasks`):
 

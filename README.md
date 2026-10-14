@@ -64,7 +64,7 @@ Full compose reference, volumes and ports: [`docs/docker.md`](docs/docker.md).
 - **Java Version Manager** — Auto-detects JVMs (8/11/17/21/25), per-server selection, MC version to Java matrix hints; Docker image ships all runtimes
 - **Real-time Terminal** — xterm.js over WebSocket, ANSI color, command queue, keyword highlights, multiple shell choices (bash, sh, cmd, pwsh, git-bash)
 - **File Manager** — Browse, edit, upload, zip/unzip, download — traversal-proof PathGuard on every path
-- **Backups** — Zip vault (compressed, retention) + snapshots (deduplicated), stop-before-backup, before/after console commands, restore and browse; archives can be uploaded to **S3/FTP/FTPS/WebDAV** destinations with per-panel retention ([docs](docs/backups.md))
+- **Backups** — Zip vault (compressed, retention) + snapshots (deduplicated), per-config folder selection (pre-filled from the game manifest), stop-before-backup, before/after console commands, restore and browse; archives can be uploaded to **S3/FTP/FTPS/WebDAV** destinations with per-panel retention ([docs](docs/backups.md))
 - **Schedules** — Every N minutes/hours/days, cron expressions, one-time runs; reaction children on start/stop/crash/backup with delays
 - **Monitoring** — Host + per-server stats (adaptive sampling), Java/Bedrock pings, player tracking, Prometheus `/metrics`
 - **Webhooks** — Discord, Slack, Mattermost, Teams, Generic — templated bodies, per-event triggers

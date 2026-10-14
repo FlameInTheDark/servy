@@ -71,7 +71,7 @@ Six fields are required: `app_id`, `slug`, `name`, `executable`,
 | `launch_options` | list | — | — | Typed fields collected at creation and appended to the command line (see [launch options](#launch-options)) |
 | `expose` | list | — | game port (tcp) | Host ports a containerized server publishes (see [expose](#expose)) |
 | `save_dirs` | list | — | — | Directories with world/save data. Validated, currently descriptive metadata |
-| `backup_dirs` | list | — | — | Directories that should be backed up. Validated, currently descriptive metadata — backups are configured per server |
+| `backup_dirs` | list | — | — | Folders (single files work too, e.g. `serverconfig.xml`) a backup of this server should cover, relative to the server directory. Frozen into each new server and pre-selected in **Server → Backups**; changing the manifest never changes servers that already exist. Empty = back up the whole server directory |
 | `notes` | string | — | — | Free text shown to administrators when picking the game |
 
 ### Launch command placeholders
@@ -424,6 +424,7 @@ rejected. Importing a recipe with the same `id` replaces the stored one.
     "config/server.properties": "motd=Example\nmax-players=20",
     "config/ops.json": "https://downloads.example.org/ops.json"
   },
+  "backup_dirs": ["world", "plugins", "server.properties"],
   "config": { "motd": "Example server", "max-players": "20" },
   "env": { "GAME_MODE": "survival" }
 }
@@ -461,6 +462,7 @@ rejected. Importing a recipe with the same `id` replaces the stored one.
 | `shell` | string | — | Terminal/exec shell for `raw_exec` servers (`bash`, `sh`, `cmd`, …) |
 | `auto_start` | bool | — | Start the server when the panel starts; also starts it right after creation unless files/config still have to be written first |
 | `crash_detection` | bool | — | Watch the process and report a crash |
+| `backup_dirs` | list | — | Folders (single files work too) a backup of servers created from this recipe covers, relative to the server directory, e.g. `["world", "plugins", "server.properties"]`. Stored on the server at creation and pre-selected in **Server → Backups**, where it can be changed afterwards. Empty = back up the whole server directory |
 | `files` | map | — | Files to write after creation: path → literal text or HTTP(S) URL |
 | `config` | map | — | Values merged into `server.properties` |
 | `env` | map | — | Seed for the server's `env.json` (values may be lists/objects) |
@@ -491,6 +493,25 @@ fail the creation instead of being passed to the game.
   *after* the server is created, so the game is started once the file exists.
 - `env` — serialised into `env.json` and merged with the environment the server
   already has.
+
+## Backup folders
+
+`backup_dirs` tells Servy what a backup of the created server should contain —
+the same idea as `backup_dirs` in a SteamCMD game manifest, for recipes:
+
+```json
+{ "backup_dirs": ["world", "plugins", "server.properties"] }
+```
+
+- Entries are relative to the server directory. A folder means "this folder and
+  everything inside it"; a file name means "just that file".
+- The list is copied onto the server when it is created, so editing the recipe
+  later does not silently change what an existing server backs up.
+- It only pre-selects the checkboxes in **Server → Backups → New/Edit backup
+  config**; nothing is backed up until a backup config exists (`auto_start`
+  servers get a default config automatically — that one uses the same list).
+- Leave it out (or empty) and backups cover the whole server directory, which is
+  what every server created before this option existed keeps doing.
 
 ## Safety and limits
 

@@ -51,6 +51,11 @@ Query ports follow the Source convention `game port + 1` unless the catalog
 declares an explicit `query_port`. The wizard validates the combination, so a
 game that would need port 65536 fails before anything is downloaded.
 
+Creating the server also creates its **default backup config**, pre-filled with
+the folders the game manifest declares for backups (its `backup_dirs`, e.g.
+`saves` for Valheim). Open **Server → Backups** to see or change that selection —
+see [what a backup covers](backups.md#what-a-backup-covers).
+
 ### Where ports come from
 
 | Execution backend | Ports |
