@@ -1,7 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import {
-  Activity, Check, ChevronDown, CircleHelp, Copy, Eye, EyeOff, Globe, Network,
+  Activity, Check, ChevronDown, CircleHelp, Cloud, Copy, Eye, EyeOff, Globe, Network,
   Plus, RefreshCw, RotateCcw, Save, ScrollText, ServerCog, Settings2, ShieldAlert,
   ShieldCheck, X, type LucideIcon,
 } from "lucide-react";
@@ -16,6 +16,7 @@ import {
   Tooltip, TooltipContent, TooltipTrigger,
 } from "@/components/ui/overlays";
 import { cn } from "@/lib/utils";
+import { BackupStoragesManager } from "@/components/BackupStorages";
 
 /* ------------------------------ field schema ------------------------------- */
 
@@ -158,6 +159,21 @@ const SECTIONS: SectionDef[] = [
       {
         key: "docker_steam_image", label: "SteamCMD image",
         hint: "Container image used to install and run SteamCMD games.",
+      },
+    ],
+  },
+  {
+    id: "backups",
+    label: "Backups",
+    icon: Cloud,
+    fields: [
+      {
+        key: "backup_local_keep", label: "Keep on host", kind: "number", min: 0, unit: "archives",
+        hint: "Backups that also upload to a destination only stay on the host as a working copy. 0 keeps everything, 1 keeps the newest.",
+      },
+      {
+        key: "backup_remote_keep", label: "Keep in destination", kind: "number", min: 0, unit: "archives",
+        hint: "How many archives per server stay in a storage destination. Older ones are deleted after a successful upload. 0 keeps everything.",
       },
     ],
   },
@@ -758,6 +774,8 @@ export default function PanelConfigPage() {
                 </Card>
               );
             })()}
+
+            {tab === "backups" && <BackupStoragesManager />}
 
             {tab === "maintenance" && (
               <MaintenanceCard pending={restarted} busy={busy} onRotate={rotate} />

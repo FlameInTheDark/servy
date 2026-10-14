@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FlameInTheDark/servy/internal/backupstore"
+	"github.com/FlameInTheDark/servy/internal/config"
 	"github.com/FlameInTheDark/servy/internal/database"
 	"github.com/FlameInTheDark/servy/internal/events"
 	"github.com/FlameInTheDark/servy/internal/files"
@@ -38,12 +40,17 @@ type Service struct {
 	log *logging.Manager
 	bus *events.Bus
 	reg *servers.Registry
+	cfg *config.Manager
 }
 
 // New builds the service.
 func New(db *database.Queries, log *logging.Manager, bus *events.Bus, reg *servers.Registry) *Service {
 	return &Service{db: db, log: log, bus: bus, reg: reg}
 }
+
+// SetConfig hands the service the panel configuration (retention counts and the
+// cluster id used as the storage namespace).
+func (s *Service) SetConfig(cfg *config.Manager) { s.cfg = cfg }
 
 // ConfigView is the API shape of a backup config.
 type ConfigView struct {
@@ -62,6 +69,7 @@ type ConfigView struct {
 	Status         map[string]interface{} `json:"status"`
 	Enabled        bool                   `json:"enabled"`
 	BackupType     string                 `json:"backup_type"`
+	StorageID      string                 `json:"storage_id,omitempty"`
 }
 
 // View converts a DB row.
@@ -70,7 +78,7 @@ func (s *Service) View(b gen.Backup) ConfigView {
 		BackupID: b.BackupID, Created: b.Created, BackupName: b.BackupName,
 		BackupLocation: b.BackupLocation, MaxBackups: b.MaxBackups, ServerID: b.ServerID,
 		Compress: b.Compress == 1, Shutdown: b.Shutdown == 1, Default: b.Default == 1,
-		Enabled: b.Enabled == 1, BackupType: b.BackupType, ExcludedDirs: []string{},
+		Enabled: b.Enabled == 1, BackupType: b.BackupType, StorageID: b.StorageID, ExcludedDirs: []string{},
 		Status: map[string]interface{}{},
 	}
 	if b.ExcludedDirs != nil {
@@ -102,7 +110,7 @@ func (s *Service) Create(b gen.Backup) (gen.Backup, error) {
 		b.BackupType = "zip_vault"
 	}
 	return s.db.CreateBackup(b.BackupID, b.Created, b.BackupName, b.BackupLocation, b.ExcludedDirs,
-		b.MaxBackups, b.ServerID, b.Compress, b.Shutdown, b.Before, b.After, b.Default, b.Status, b.Enabled, b.BackupType)
+		b.MaxBackups, b.ServerID, b.Compress, b.Shutdown, b.Before, b.After, b.Default, b.Status, b.Enabled, b.BackupType, b.StorageID)
 }
 
 // List returns configs for a server.
@@ -123,7 +131,7 @@ func (s *Service) Get(backupID string) (gen.Backup, error) {
 // Update mutates a config.
 func (s *Service) Update(b gen.Backup) error {
 	return s.db.UpdateBackup(b.BackupName, b.BackupLocation, b.ExcludedDirs, b.MaxBackups, b.Compress,
-		b.Shutdown, b.Before, b.After, b.Default, b.Status, b.Enabled, b.BackupType, b.BackupID)
+		b.Shutdown, b.Before, b.After, b.Default, b.Status, b.Enabled, b.BackupType, b.StorageID, b.BackupID)
 }
 
 // EnsureConfig mirrors a config row into the local database so this host can
@@ -174,6 +182,9 @@ func (s *Service) EnsureConfig(b gen.Backup, defaultLocation string) (gen.Backup
 		if b.Enabled == 0 {
 			b.Enabled = existing.Enabled
 		}
+		if b.StorageID == "" {
+			b.StorageID = existing.StorageID
+		}
 		if err := s.Update(b); err != nil {
 			return b, err
 		}
@@ -191,21 +202,51 @@ func (s *Service) EnsureConfig(b gen.Backup, defaultLocation string) (gen.Backup
 	return s.Create(b)
 }
 
-// Delete removes a config (and its files if requested).
+// Delete removes a config (and its files if requested) using the destination
+// this panel knows for it.
 func (s *Service) Delete(backupID string, removeFiles bool) error {
 	b, err := s.db.GetBackup(backupID)
 	if err != nil {
 		return ErrNotFound
 	}
-	if removeFiles && b.BackupLocation != "" {
-		os.RemoveAll(b.BackupLocation)
+	return s.DeleteWithPlan(backupID, removeFiles, s.PlanFor(b))
+}
+
+// DeleteWithPlan is Delete with the destination resolved elsewhere — a node
+// that got the plan from the panel does not know the panel's storage rows.
+func (s *Service) DeleteWithPlan(backupID string, removeFiles bool, plan StoragePlan) error {
+	b, err := s.db.GetBackup(backupID)
+	if err != nil {
+		return ErrNotFound
+	}
+	if removeFiles {
+		if b.BackupLocation != "" {
+			os.RemoveAll(b.BackupLocation)
+		}
+		if plan.Active() {
+			if err := s.DeleteRemoteServer(plan, b.ServerID); err != nil {
+				s.log.Get("backup").Warning("removing remote archives of %s failed: %v", b.ServerID, err)
+			}
+		}
 	}
 	return s.db.DeleteBackup(backupID)
 }
 
-// Run executes a backup now: shutdown option → before cmd → engine → after cmd
-// → retention → restart-if-was-running. Publishes backup_start/backup_end.
+// Run executes a backup now: shutdown option → before cmd → engine → upload to
+// the storage destination → retention → restart-if-was-running. Publishes
+// backup_start/backup_end.
 func (s *Service) Run(backupID string, userID int64) error {
+	b, err := s.db.GetBackup(backupID)
+	if err != nil {
+		return ErrNotFound
+	}
+	return s.RunWithPlan(backupID, userID, s.PlanFor(b))
+}
+
+// RunWithPlan runs a backup with an explicit storage plan. Nodes receive the
+// plan from the panel, so they use the panel's destination and retention
+// settings instead of their own configuration.
+func (s *Service) RunWithPlan(backupID string, userID int64, plan StoragePlan) error {
 	b, err := s.db.GetBackup(backupID)
 	if err != nil {
 		return ErrNotFound
@@ -258,7 +299,8 @@ func (s *Service) Run(backupID string, userID int64) error {
 	}
 	s.setStatus(b.BackupID, "last_run", database.Now())
 	s.setStatus(b.BackupID, "last_error", "")
-	s.applyRetention(b)
+	s.applyRetention(b, plan)
+	s.uploadLatest(b, plan)
 	s.log.Audit("", userID, b.ServerID, "", fmt.Sprintf("Ran backup %q (%s)", b.BackupName, b.BackupType))
 	s.bus.Publish(events.Event{Type: events.EvBackupDone, ServerID: b.ServerID,
 		Data: map[string]interface{}{"ok": true, "backup_id": backupID, "name": sup.Definition().ServerName}})
@@ -434,9 +476,18 @@ func addZipEntry(zw *zip.Writer, path, rel string) error {
 	return err
 }
 
-// applyRetention prunes oldest archives beyond max_backups (0 = keep all).
-func (s *Service) applyRetention(b gen.Backup) {
-	if b.MaxBackups <= 0 {
+// applyRetention prunes the oldest local archives of a server.
+//
+// With a storage destination configured the local files are only a cache: the
+// panel keeps plan.KeepLocal of them (default 1, so restore stays instant) and
+// the destination keeps its own history. Without a destination the per-config
+// max_backups applies as before. A keep value of 0 means "keep everything".
+func (s *Service) applyRetention(b gen.Backup, plan StoragePlan) {
+	keep := int(b.MaxBackups)
+	if plan.Active() {
+		keep = plan.KeepLocal
+	}
+	if keep <= 0 {
 		return
 	}
 	entries, err := os.ReadDir(b.BackupLocation)
@@ -445,8 +496,8 @@ func (s *Service) applyRetention(b gen.Backup) {
 	}
 	var archives []string
 	prefix := ""
-	if def, err := s.db.GetServer(b.ServerID); err == nil {
-		prefix = def.ServerID + "_"
+	if b.ServerID != "" {
+		prefix = b.ServerID + "_"
 	}
 	for _, e := range entries {
 		n := e.Name()
@@ -455,7 +506,7 @@ func (s *Service) applyRetention(b gen.Backup) {
 		}
 	}
 	sort.Strings(archives) // timestamped names sort chronologically
-	for len(archives) > int(b.MaxBackups) {
+	for len(archives) > keep {
 		oldest := archives[0]
 		archives = archives[1:]
 		os.Remove(filepath.Join(b.BackupLocation, oldest))
@@ -463,22 +514,175 @@ func (s *Service) applyRetention(b gen.Backup) {
 	}
 }
 
+// uploadLatest uploads the newest local archive to the destination and rotates
+// the remote history. A failed upload is reported in the config status but does
+// not fail the backup itself — the archive stays on disk.
+func (s *Service) uploadLatest(b gen.Backup, plan StoragePlan) {
+	if !plan.Active() {
+		return
+	}
+	archive, ok := newestArchive(b.BackupLocation, b.ServerID)
+	if !ok {
+		return
+	}
+	if err := s.UploadArchive(plan, b.ServerID, archive); err != nil {
+		s.log.Get("backup").Error("upload of %s failed: %v", filepath.Base(archive), err)
+		s.setStatus(b.BackupID, "last_upload_error", err.Error())
+		s.setStatus(b.BackupID, "last_upload", "")
+		return
+	}
+	s.setStatus(b.BackupID, "last_upload", database.Now())
+	s.setStatus(b.BackupID, "last_upload_error", "")
+	s.setStatus(b.BackupID, "last_upload_archive", filepath.Base(archive))
+	if plan.KeepRemote > 0 {
+		if removed, err := s.PruneRemote(plan, b.ServerID, plan.KeepRemote); err != nil {
+			s.log.Get("backup").Error("remote retention failed: %v", err)
+		} else if removed > 0 {
+			s.log.Get("backup").Info("remote retention: removed %d archive(s) of %s", removed, b.ServerID)
+		}
+	}
+	// Only now that the archive is safely uploaded may the local cache be
+	// trimmed, otherwise a failing destination would cost the history.
+	if plan.KeepLocal >= 0 {
+		s.pruneLocal(b.BackupLocation, b.ServerID, plan.KeepLocal)
+	}
+}
+
+// newestArchive returns the most recent archive file of a server.
+func newestArchive(dir, serverID string) (string, bool) {
+	files, err := ArchivesIn(dir)
+	if err != nil || len(files) == 0 {
+		return "", false
+	}
+	for _, f := range files { // ArchivesIn sorts newest first
+		if strings.HasPrefix(f.Name, serverID+"_") {
+			return f.Path, true
+		}
+	}
+	return "", false
+}
+
+// pruneLocal keeps the newest keep archives of a server on disk.
+func (s *Service) pruneLocal(dir, serverID string, keep int) int {
+	if keep < 0 {
+		return 0
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	archives := []string{}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, serverID+"_") && (strings.HasSuffix(name, ".zip") || strings.HasSuffix(name, ".snap.json")) {
+			archives = append(archives, name)
+		}
+	}
+	sort.Strings(archives)
+	removed := 0
+	for len(archives) > keep {
+		oldest := archives[0]
+		archives = archives[1:]
+		if err := os.Remove(filepath.Join(dir, oldest)); err == nil {
+			removed++
+			s.log.Get("backup").Info("retention: removed local cache %s", oldest)
+		}
+	}
+	return removed
+}
+
 // Archives lists executed backups (files) for a config.
 type ArchiveFile struct {
 	Name     string    `json:"name"`
 	Size     int64     `json:"size"`
 	Modified time.Time `json:"modified"`
-	Path     string    `json:"path"`
-	Type     string    `json:"type"` // zip | snapshot
+	Path     string    `json:"path,omitempty"`
+	Type     string    `json:"type"`   // zip | snapshot
+	Source   string    `json:"source"` // local | remote | both
 }
 
-// Archives scans the backup location for artifacts.
+// archiveType maps an archive name to zip or snapshot.
+func archiveType(name string) string {
+	if strings.HasSuffix(name, ".snap.json") {
+		return "snapshot"
+	}
+	return "zip"
+}
+
+// Archives scans the backup location for artifacts and adds the archives that
+// only exist in the storage destination, so the UI can show and restore them.
 func (s *Service) Archives(backupID string) ([]ArchiveFile, error) {
 	b, err := s.db.GetBackup(backupID)
 	if err != nil {
 		return nil, ErrNotFound
 	}
-	return ArchivesIn(b.BackupLocation)
+	return s.ArchivesWithPlan(b, s.PlanFor(b))
+}
+
+// ArchivesWithPlan merges local and remote archives of a config.
+func (s *Service) ArchivesWithPlan(b gen.Backup, plan StoragePlan) ([]ArchiveFile, error) {
+	local, err := ArchivesIn(b.BackupLocation)
+	if err != nil {
+		local = []ArchiveFile{}
+	}
+	for i := range local {
+		local[i].Source = "local"
+	}
+	if !plan.Active() {
+		return local, nil
+	}
+	remote, rerr := s.RemoteArchives(plan, b.ServerID)
+	if rerr != nil {
+		// A destination that is down must not hide the local archives.
+		s.log.Get("backup").Warning("listing remote archives of %s failed: %v", b.ServerID, rerr)
+		return local, nil
+	}
+	byName := map[string]int{}
+	for i, a := range local {
+		byName[a.Name] = i
+	}
+	for _, a := range remote {
+		if idx, ok := byName[a.Name]; ok {
+			local[idx].Source = "both"
+			if local[idx].Size == 0 {
+				local[idx].Size = a.Size
+			}
+			continue
+		}
+		local = append(local, a)
+	}
+	sort.Slice(local, func(i, j int) bool {
+		if local[i].Name != local[j].Name {
+			return local[i].Name > local[j].Name
+		}
+		return local[i].Modified.After(local[j].Modified)
+	})
+	return local, nil
+}
+
+// EnsureLocal makes sure an archive is on disk, downloading it from the
+// destination when the local cache no longer has it. The returned path is safe
+// to restore from.
+func (s *Service) EnsureLocal(backupID, name string, plan StoragePlan) (string, error) {
+	b, err := s.db.GetBackup(backupID)
+	if err != nil {
+		return "", ErrNotFound
+	}
+	localPath := filepath.Join(b.BackupLocation, filepath.Base(name))
+	if _, err := os.Stat(localPath); err == nil {
+		return localPath, nil
+	}
+	if !plan.Active() {
+		return "", ErrNotFound
+	}
+	fetched, err := s.FetchRemoteArchive(plan, b.ServerID, filepath.Base(name), b.BackupLocation)
+	if err != nil {
+		if errors.Is(err, backupstore.ErrNotExist) {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	return fetched, nil
 }
 
 // ArchivesIn scans a directory for backup artifacts (used by nodes that store
@@ -551,10 +755,17 @@ func (s *Service) ExtractArchiveFile(path, member, destPath string) error {
 }
 
 // Restore restores a backup into the server directory (stops the server first).
+// When the archive is not on disk any more it is fetched from the destination.
 func (s *Service) Restore(backupID, archivePath string, userID int64) error {
 	b, err := s.db.GetBackup(backupID)
 	if err != nil {
 		return ErrNotFound
+	}
+	if _, err := os.Stat(archivePath); err != nil && archivePath == filepath.Join(b.BackupLocation, filepath.Base(archivePath)) {
+		plan := s.PlanFor(b)
+		if fetched, ferr := s.EnsureLocal(backupID, filepath.Base(archivePath), plan); ferr == nil {
+			archivePath = fetched
+		}
 	}
 	sup, err := s.reg.Get(b.ServerID)
 	if err != nil {

@@ -220,7 +220,7 @@ func ImportLegacyPanel(q *Queries, log *logging.Manager, oldDB, oldDataDir strin
                                 typ = "zip_vault"
                         }
                         _, err := q.CreateBackup(id, Now(), name, location, np(excluded), int64(maxB), sid,
-                                int64(compress), int64(shutdown), np(before), np(after), int64(deflt), np(status), int64(enabled), typ)
+                                int64(compress), int64(shutdown), np(before), np(after), int64(deflt), np(status), int64(enabled), typ, "")
                         if err != nil {
                                 report.Skipped = append(report.Skipped, "backup row: "+err.Error())
                                 continue

@@ -240,7 +240,10 @@ message DirListing {
 message BackupRunRequest {
   string server_id = 1;
   string backup_id = 2;
-  string payload = 3; // JSON gen.Backup row (metadata the node needs to run)
+  // JSON backup bundle: {"backup": gen.Backup, "storage": gen.BackupStorage,
+  // "cluster_id": string}. A bare gen.Backup object is still accepted for
+  // nodes running an older version of Servy.
+  string payload = 3;
 }
 
 message BackupRef {
@@ -248,6 +251,11 @@ message BackupRef {
   string backup_id = 2;
   string archive = 3; // archive file name inside the backup
   bool remove_files = 4;
+  // JSON backup bundle (same shape as BackupRunRequest.payload): the panel
+  // re-sends the backup row and its storage destination so a node always acts
+  // on the current configuration and can reach archives that only exist in
+  // the remote storage.
+  string payload = 5;
 }
 
 message BackupReadRequest {
@@ -255,6 +263,8 @@ message BackupReadRequest {
   string backup_id = 2;
   string path = 3; // archive path relative to the backup dir
   int64 max_bytes = 4;
+  // JSON backup bundle, see BackupRef.payload.
+  string payload = 5;
 }
 
 message ArchiveChunk {

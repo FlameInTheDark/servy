@@ -1,8 +1,8 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -112,9 +112,25 @@ func (a *App) createBackup(c fiber.Ctx) error {
 		Default      bool     `json:"default"`
 		Enabled      bool     `json:"enabled"`
 		BackupType   string   `json:"backup_type,omitempty"`
+		// Absent means "use the default destination", an empty string means
+		// "keep this one local" — the panel always sends an explicit value.
+		StorageID *string `json:"storage_id,omitempty"`
 	}
 	if err := parseBody(c, &req); err != nil {
 		return err
+	}
+	storageID := ""
+	if req.StorageID == nil {
+		if def := a.Backups.DefaultStorage(); def != nil {
+			storageID = def.ID
+		}
+	} else {
+		storageID = *req.StorageID
+	}
+	if storageID != "" {
+		if _, err := a.Backups.GetStorageView(storageID); err != nil {
+			return failMsg(c, 400, "STORAGE_NOT_FOUND", "unknown storage destination")
+		}
 	}
 	def, err := a.DB.GetServer(serverID)
 	if err != nil {
@@ -137,6 +153,7 @@ func (a *App) createBackup(c fiber.Ctx) error {
 		MaxBackups: req.MaxBackups, ServerID: serverID, Compress: bool2i(req.Compress),
 		Shutdown: bool2i(req.Shutdown), Before: &req.Before, After: &req.After,
 		Default: bool2i(req.Default), Enabled: bool2i(req.Enabled), BackupType: btype,
+		StorageID: storageID,
 	})
 	if err != nil {
 		return failMsg(c, 400, err.Error(), err.Error())
@@ -185,9 +202,15 @@ func (a *App) patchBackup(c fiber.Ctx) error {
 		After        *string  `json:"after,omitempty"`
 		Default      *bool    `json:"default,omitempty"`
 		Enabled      *bool    `json:"enabled,omitempty"`
+		StorageID    *string  `json:"storage_id,omitempty"`
 	}
 	if err := parseBody(c, &req); err != nil {
 		return err
+	}
+	if req.StorageID != nil && *req.StorageID != "" {
+		if _, err := a.Backups.GetStorageView(*req.StorageID); err != nil {
+			return failMsg(c, 400, "STORAGE_NOT_FOUND", "unknown storage destination")
+		}
 	}
 	if req.Name != nil {
 		b.BackupName = *req.Name
@@ -223,6 +246,9 @@ func (a *App) patchBackup(c fiber.Ctx) error {
 	if req.Enabled != nil {
 		b.Enabled = bool2i(*req.Enabled)
 	}
+	if req.StorageID != nil {
+		b.StorageID = *req.StorageID
+	}
 	if err := a.Backups.Update(b); err != nil {
 		return failMsg(c, 400, err.Error(), err.Error())
 	}
@@ -239,7 +265,7 @@ func (a *App) deleteBackup(c fiber.Ctx) error {
 		if !a.nodeOnline(nodeID) {
 			return fail(c, 502, "NODE_OFFLINE")
 		}
-		if err := a.Cluster.BackupDelete(nodeID, b.ServerID, b.BackupID, removeFiles); err != nil {
+		if err := a.Cluster.BackupDelete(nodeID, b.ServerID, b.BackupID, removeFiles, a.Backups.BundleFor(b)); err != nil {
 			return failMsg(c, 502, "NODE_ERROR", err.Error())
 		}
 		if err := a.DB.DeleteBackup(b.BackupID); err != nil {
@@ -278,7 +304,7 @@ func (a *App) runRemoteBackup(c fiber.Ctx, nodeID string, b gen.Backup) error {
 	if !a.nodeOnline(nodeID) {
 		return fail(c, 502, "NODE_OFFLINE")
 	}
-	raw, err := a.Cluster.BackupRun(nodeID, b.ServerID, b.BackupID, b)
+	raw, err := a.Cluster.BackupRun(nodeID, b.ServerID, b.BackupID, a.Backups.BundleFor(b))
 	if err != nil {
 		return failMsg(c, 502, "NODE_ERROR", err.Error())
 	}
@@ -310,7 +336,7 @@ func (a *App) restoreBackup(c fiber.Ctx) error {
 		if !a.nodeOnline(nodeID) {
 			return fail(c, 502, "NODE_OFFLINE")
 		}
-		if err := a.Cluster.BackupRestore(nodeID, b.ServerID, b.BackupID, archive); err != nil {
+		if err := a.Cluster.BackupRestore(nodeID, b.ServerID, b.BackupID, archive, a.Backups.BundleFor(b)); err != nil {
 			return failMsg(c, 502, "NODE_ERROR", err.Error())
 		}
 		return ok(c, fiber.Map{"restored": archive, "node_id": nodeID})
@@ -330,7 +356,7 @@ func (a *App) backupArchives(c fiber.Ctx) error {
 		if !a.nodeOnline(nodeID) {
 			return fail(c, 502, "NODE_OFFLINE")
 		}
-		raw, err := a.Cluster.BackupFiles(nodeID, b.ServerID, b.BackupID, "")
+		raw, err := a.Cluster.BackupFiles(nodeID, b.ServerID, b.BackupID, "", a.Backups.BundleFor(b))
 		if err != nil {
 			return failMsg(c, 502, "NODE_ERROR", err.Error())
 		}
@@ -356,14 +382,17 @@ func (a *App) backupDownload(c fiber.Ctx) error {
 		if !a.nodeOnline(nodeID) {
 			return fail(c, 502, "NODE_OFFLINE")
 		}
-		data, err := a.Cluster.BackupRead(nodeID, b.ServerID, b.BackupID, name)
+		data, err := a.Cluster.BackupRead(nodeID, b.ServerID, b.BackupID, name, a.Backups.BundleFor(b))
 		if err != nil {
 			return failMsg(c, 502, "NODE_ERROR", err.Error())
 		}
 		c.Set("Content-Disposition", "attachment; filename="+name)
 		return c.Send(data)
 	}
-	path := filepath.Join(b.BackupLocation, name)
+	path, err := a.Backups.EnsureLocal(b.BackupID, name, a.Backups.PlanFor(b))
+	if err != nil {
+		return failMsg(c, 404, "ARCHIVE_NOT_FOUND", err.Error())
+	}
 	c.Set("Content-Disposition", "attachment; filename="+name)
 	return c.SendFile(path)
 }
@@ -381,7 +410,7 @@ func (a *App) backupArchiveFiles(c fiber.Ctx) error {
 		if !a.nodeOnline(nodeID) {
 			return fail(c, 502, "NODE_OFFLINE")
 		}
-		raw, err := a.Cluster.BackupFiles(nodeID, b.ServerID, b.BackupID, name)
+		raw, err := a.Cluster.BackupFiles(nodeID, b.ServerID, b.BackupID, name, a.Backups.BundleFor(b))
 		if err != nil {
 			return failMsg(c, 502, "NODE_ERROR", err.Error())
 		}

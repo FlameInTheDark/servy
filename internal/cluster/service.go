@@ -7,16 +7,16 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 
-	pb "github.com/FlameInTheDark/servy/internal/cluster/pb"
 	"github.com/FlameInTheDark/servy/internal/backups"
+	pb "github.com/FlameInTheDark/servy/internal/cluster/pb"
 	"github.com/FlameInTheDark/servy/internal/creation"
 	"github.com/FlameInTheDark/servy/internal/database"
 	"github.com/FlameInTheDark/servy/internal/events"
@@ -764,28 +764,34 @@ func (s *Service) backupDirFor(serverID string) (string, error) {
 }
 
 // ensureBackupRow stores the panel's config with a node-local location so the
-// node can run it (archives always live next to their server).
-func (s *Service) ensureBackupRow(payload, serverID string) (gen.Backup, error) {
+// node can run it (archives always live next to their server) and returns the
+// storage plan the panel shipped with it.
+func (s *Service) ensureBackupRow(payload, serverID string) (gen.Backup, backups.StoragePlan, error) {
+	var plan backups.StoragePlan
 	var row gen.Backup
 	if payload != "" {
-		if err := json.Unmarshal([]byte(payload), &row); err != nil {
-			return row, fmt.Errorf("invalid backup metadata: %w", err)
+		bundle, err := backups.DecodeBundle(payload)
+		if err != nil {
+			return row, plan, err
 		}
+		row = bundle.Backup
+		plan = bundle.Plan
 	}
 	if s.deps.Backups == nil {
-		return row, errors.New("no backup service on this node")
+		return row, plan, errors.New("no backup service on this node")
 	}
 	if row.ServerID == "" {
 		row.ServerID = serverID
 	}
 	if row.BackupID == "" {
-		return row, errors.New("backup id required")
+		return row, plan, errors.New("backup id required")
 	}
 	dir, err := s.backupDirFor(row.ServerID)
 	if err != nil {
-		return row, err
+		return row, plan, err
 	}
-	return s.deps.Backups.EnsureConfig(row, dir)
+	row, err = s.deps.Backups.EnsureConfig(row, dir)
+	return row, plan, err
 }
 
 // BackupRun executes a backup on this node.
@@ -793,11 +799,11 @@ func (s *Service) BackupRun(ctx context.Context, req *pb.BackupRunRequest) (*pb.
 	if err := s.authorize(ctx, ""); err != nil {
 		return &pb.NodeReply{Ok: false, Message: err.Error()}, nil
 	}
-	row, err := s.ensureBackupRow(req.Payload, req.ServerId)
+	row, plan, err := s.ensureBackupRow(req.Payload, req.ServerId)
 	if err != nil {
 		return &pb.NodeReply{Ok: false, Message: err.Error()}, nil
 	}
-	if err := s.deps.Backups.Run(row.BackupID, 0); err != nil {
+	if err := s.deps.Backups.RunWithPlan(row.BackupID, 0, plan); err != nil {
 		return &pb.NodeReply{Ok: false, Message: err.Error()}, nil
 	}
 	updated, err := s.deps.DB.GetBackup(row.BackupID)
@@ -816,7 +822,7 @@ func (s *Service) BackupRestore(ctx context.Context, req *pb.BackupRef) (*pb.Nod
 	if s.deps.Backups == nil {
 		return &pb.NodeReply{Ok: false, Message: "no backup service on this node"}, nil
 	}
-	row, err := s.ensureBackupRow("", req.ServerId)
+	row, plan, err := s.ensureBackupRow(req.Payload, req.ServerId)
 	if err != nil {
 		return &pb.NodeReply{Ok: false, Message: err.Error()}, nil
 	}
@@ -827,6 +833,15 @@ func (s *Service) BackupRestore(ctx context.Context, req *pb.BackupRef) (*pb.Nod
 	target := filepath.Join(dir, filepath.Base(req.Archive))
 	if !strings.HasPrefix(target, dir) {
 		return &pb.NodeReply{Ok: false, Message: "archive path escapes the backup directory"}, nil
+	}
+	// The local cache may have rotated the archive away: pull it back from the
+	// storage destination before restoring.
+	if _, err := os.Stat(target); err != nil && plan.Active() {
+		fetched, ferr := s.deps.Backups.FetchRemoteArchive(plan, row.ServerID, filepath.Base(req.Archive), dir)
+		if ferr != nil {
+			return &pb.NodeReply{Ok: false, Message: ferr.Error()}, nil
+		}
+		target = fetched
 	}
 	if err := s.deps.Backups.Restore(req.BackupId, target, 0); err != nil {
 		return &pb.NodeReply{Ok: false, Message: err.Error()}, nil
@@ -842,10 +857,11 @@ func (s *Service) BackupDelete(ctx context.Context, req *pb.BackupRef) (*pb.Node
 	if s.deps.Backups == nil {
 		return &pb.NodeReply{Ok: false, Message: "no backup service on this node"}, nil
 	}
-	if _, err := s.ensureBackupRow("", req.ServerId); err != nil {
+	_, plan, err := s.ensureBackupRow(req.Payload, req.ServerId)
+	if err != nil {
 		return &pb.NodeReply{Ok: false, Message: err.Error()}, nil
 	}
-	if err := s.deps.Backups.Delete(req.BackupId, req.RemoveFiles); err != nil {
+	if err := s.deps.Backups.DeleteWithPlan(req.BackupId, req.RemoveFiles, plan); err != nil {
 		return &pb.NodeReply{Ok: false, Message: err.Error()}, nil
 	}
 	return &pb.NodeReply{Ok: true}, nil
@@ -864,14 +880,29 @@ func (s *Service) BackupFiles(ctx context.Context, req *pb.BackupRef) (*pb.NodeR
 		return &pb.NodeReply{Ok: false, Message: err.Error()}, nil
 	}
 	if req.Archive != "" {
-		names, err := s.deps.Backups.ListArchiveFiles(filepath.Join(dir, filepath.Base(req.Archive)))
+		path := filepath.Join(dir, filepath.Base(req.Archive))
+		if _, serr := os.Stat(path); serr != nil {
+			if bundle, berr := backups.DecodeBundle(req.Payload); berr == nil && bundle.Plan.Active() {
+				if fetched, ferr := s.deps.Backups.FetchRemoteArchive(bundle.Plan, req.ServerId, filepath.Base(req.Archive), dir); ferr == nil {
+					path = fetched
+				}
+			}
+		}
+		names, err := s.deps.Backups.ListArchiveFiles(path)
 		if err != nil {
 			return &pb.NodeReply{Ok: false, Message: err.Error()}, nil
 		}
 		raw, _ := json.Marshal(names)
 		return &pb.NodeReply{Ok: true, Payload: string(raw)}, nil
 	}
-	archives, err := backups.ArchivesIn(dir)
+	bundle, _ := backups.DecodeBundle(req.Payload)
+	row := bundle.Backup
+	if row.BackupID == "" {
+		row.BackupID = req.BackupId
+	}
+	row.ServerID = req.ServerId
+	row.BackupLocation = dir
+	archives, err := s.deps.Backups.ArchivesWithPlan(row, bundle.Plan)
 	if err != nil {
 		return &pb.NodeReply{Ok: false, Message: err.Error()}, nil
 	}
@@ -889,6 +920,13 @@ func (s *Service) BackupRead(req *pb.BackupReadRequest, stream pb.NodeService_Ba
 		return err
 	}
 	full := filepath.Join(dir, filepath.Clean("/"+req.Path))
+	if _, serr := os.Stat(full); serr != nil && s.deps.Backups != nil {
+		if bundle, berr := backups.DecodeBundle(req.Payload); berr == nil && bundle.Plan.Active() {
+			if fetched, ferr := s.deps.Backups.FetchRemoteArchive(bundle.Plan, req.ServerId, filepath.Base(req.Path), dir); ferr == nil {
+				full = fetched
+			}
+		}
+	}
 	rel, err := filepath.Rel(dir, full)
 	if err != nil || len(rel) > 1 && rel[0] == '.' {
 		return errors.New("path escapes the backup directory")
@@ -1031,4 +1069,3 @@ func peerIP(ctx context.Context) string {
 	}
 	return host
 }
-

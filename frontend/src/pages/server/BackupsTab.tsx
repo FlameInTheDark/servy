@@ -1,24 +1,48 @@
 import { useState } from "react";
 import { toast } from "sonner";
-import { HardDriveDownload, Play, RotateCcw, Plus, Trash2, Save } from "lucide-react";
+import { HardDriveDownload, Play, RotateCcw, Plus, Trash2, Save, Cloud, Server } from "lucide-react";
+import { Link } from "react-router-dom";
 import { useApi } from "@/hooks/useApi";
-import { GET, POST, PATCH, DEL, BackupConfig } from "@/api/client";
+import { GET, POST, PATCH, DEL, BackupConfig, BackupArchive, BackupStorage } from "@/api/client";
 import { Button, Card, CardContent, Input, Label, Switch, Badge, Skeleton } from "@/components/ui/primitives";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/overlays";
 import { SimpleSelect } from "@/components/ui/overlays";
 import { formatBytes, timeAgo } from "@/lib/utils";
 
+const KIND_LABEL: Record<string, string> = {
+  s3: "S3", ftp: "FTP", webdav: "WebDAV", sftp: "SFTP", local: "Folder",
+};
+
+/** Where an archive lives: on the host, in the destination, or both. */
+function SourceBadge({ source }: { source: string }) {
+  if (source === "both") {
+    return <Badge variant="secondary"><Cloud className="mr-1 h-3 w-3" />host + remote</Badge>;
+  }
+  if (source === "remote") {
+    return <Badge variant="secondary"><Cloud className="mr-1 h-3 w-3" />remote only</Badge>;
+  }
+  return <Badge variant="muted"><Server className="mr-1 h-3 w-3" />host only</Badge>;
+}
+
 export default function BackupsTab({ serverId }: { serverId: string }) {
   const { data: configs, refetch } = useApi<BackupConfig[]>(`/servers/${serverId}/backups`);
+  const { data: storages } = useApi<BackupStorage[]>("/panel/backup-storages");
   const [editing, setEditing] = useState<Partial<BackupConfig> | null>(null);
   const [archivesFor, setArchivesFor] = useState<BackupConfig | null>(null);
-  const [archives, setArchives] = useState<any[]>([]);
+  const [archives, setArchives] = useState<BackupArchive[]>([]);
   const [busy, setBusy] = useState("");
+
+  const storageOf = (id?: string) => storages?.find((s) => s.storage_id === id);
 
   const openArchives = async (cfg: BackupConfig) => {
     setArchivesFor(cfg);
-    const list = await GET<any[]>(`/backups/backup/${cfg.backup_id}/archives`);
-    setArchives(list || []);
+    setArchives([]);
+    try {
+      const list = await GET<BackupArchive[]>(`/backups/backup/${cfg.backup_id}/archives`);
+      setArchives(list || []);
+    } catch (e: any) {
+      toast.error(e.message);
+    }
   };
 
   const runBackup = async (cfg: BackupConfig) => {
@@ -43,6 +67,7 @@ export default function BackupsTab({ serverId }: { serverId: string }) {
         compress: !!editing.compress, shutdown: !!editing.shutdown,
         before: editing.before || "", after: editing.after || "",
         default: !!editing.default, enabled: !!editing.enabled, backup_type: editing.backup_type,
+        storage_id: editing.storage_id || "",
       };
       if (editing.backup_id) await PATCH(`/backups/backup/${editing.backup_id}`, payload);
       else await POST(`/servers/${serverId}/backups`, payload);
@@ -55,9 +80,11 @@ export default function BackupsTab({ serverId }: { serverId: string }) {
   };
 
   const del = async (cfg: BackupConfig) => {
-    if (!confirm(`Delete backup config "${cfg.backup_name}"?`)) return;
+    const target = storageOf(cfg.storage_id);
+    const extra = target ? `\nUploaded archives in "${target.name}" are removed too.` : "";
+    if (!confirm(`Delete backup config "${cfg.backup_name}"?${extra}`)) return;
     try {
-      await DEL(`/backups/backup/${cfg.backup_id}`);
+      await DEL(`/backups/backup/${cfg.backup_id}?files=true`);
       refetch();
     } catch (e: any) {
       toast.error(e.message);
@@ -102,7 +129,21 @@ export default function BackupsTab({ serverId }: { serverId: string }) {
                       <Badge variant="secondary">{c.backup_type}</Badge>
                       {!c.enabled && <Badge variant="muted">disabled</Badge>}
                     </div>
-                    <div className="mt-1 font-mono text-xs text-muted-foreground">{c.backup_location}</div>
+                    <div className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
+                      {storageOf(c.storage_id) ? (
+                        <>
+                          <Cloud className="h-3.5 w-3.5 text-primary" />
+                          <span>{storageOf(c.storage_id)!.name}</span>
+                          <Badge variant="muted">{KIND_LABEL[storageOf(c.storage_id)!.kind] || storageOf(c.storage_id)!.kind}</Badge>
+                        </>
+                      ) : (
+                        <>
+                          <Server className="h-3.5 w-3.5" />
+                          <span>this host only</span>
+                        </>
+                      )}
+                    </div>
+                    <div className="mt-1 font-mono text-[11px] text-muted-foreground">{c.backup_location}</div>
                   </div>
                   <div className="flex gap-1">
                     <Button size="icon-sm" variant="ghost" title="Run now" onClick={() => runBackup(c)}>
@@ -122,9 +163,18 @@ export default function BackupsTab({ serverId }: { serverId: string }) {
                 <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
                   <span>{c.compress ? "compressed" : "uncompressed"}</span>
                   <span>{c.shutdown ? "stops server first" : "hot backup"}</span>
-                  <span>retention: {c.max_backups > 0 ? `${c.max_backups} max` : "unlimited"}</span>
+                  <span>
+                    retention: {storageOf(c.storage_id)
+                      ? "panel policy (host + remote)"
+                      : c.max_backups > 0 ? `${c.max_backups} max` : "unlimited"}
+                  </span>
                   {c.excluded_dirs?.length > 0 && <span>excl: {c.excluded_dirs.join(", ")}</span>}
                   {c.status?.last_run && <span>last run {timeAgo(c.status.last_run as string)}</span>}
+                  {c.status?.last_upload_error ? (
+                    <span className="text-destructive">upload failed: {String(c.status.last_upload_error)}</span>
+                  ) : c.status?.last_upload ? (
+                    <span className="text-primary">uploaded {timeAgo(c.status.last_upload as string)}</span>
+                  ) : null}
                 </div>
               </CardContent>
             </Card>
@@ -159,6 +209,26 @@ export default function BackupsTab({ serverId }: { serverId: string }) {
                 <Label>Max backups (0 = all)</Label>
                 <Input type="number" value={editing?.max_backups ?? 0} onChange={(e) => setEditing(editing && { ...editing, max_backups: +e.target.value })} />
               </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="flex items-center gap-1.5">
+                <Cloud className="h-3.5 w-3.5" /> Storage destination
+              </Label>
+              <SimpleSelect
+                value={editing?.storage_id || ""}
+                onValueChange={(v) => setEditing(editing && { ...editing, storage_id: v })}
+                placeholder="This host only"
+                options={(storages || []).filter((s) => s.enabled).map((s) => ({
+                  value: s.storage_id,
+                  label: `${s.name} (${KIND_LABEL[s.kind] || s.kind})`,
+                }))}
+              />
+              <p className="text-[11px] text-muted-foreground">
+                {editing?.storage_id
+                  ? "The host running this server uploads each archive. Local copies follow the panel's retention policy."
+                  : <>Archives stay on the host that runs this server. Add destinations in{" "}
+                      <Link to="/config" className="text-primary underline-offset-2 hover:underline">panel settings</Link>.</>}
+              </p>
             </div>
             <div className="space-y-1.5">
               <Label>Location (blank = default)</Label>
@@ -202,7 +272,10 @@ export default function BackupsTab({ serverId }: { serverId: string }) {
                 <HardDriveDownload className="h-4 w-4 shrink-0 text-primary" />
                 <div className="min-w-0 flex-1">
                   <div className="truncate font-mono text-xs">{a.name}</div>
-                  <div className="text-[10px] text-muted-foreground">{formatBytes(a.size)} · {timeAgo(a.modified)}</div>
+                  <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+                    <span>{formatBytes(a.size)} · {timeAgo(a.modified)}</span>
+                    <SourceBadge source={a.source} />
+                  </div>
                 </div>
                 <a href={`/api/v1/backups/backup/${archivesFor?.backup_id}/download/${a.name}?token=${localStorage.getItem("servy_token")}`}>
                   <Button size="sm" variant="outline">Download</Button>

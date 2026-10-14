@@ -255,7 +255,54 @@ export interface BackupConfig {
   default: boolean;
   enabled: boolean;
   backup_type: string;
+  /** Storage destination the archives are uploaded to (empty = local only). */
+  storage_id?: string;
   status: Record<string, any>;
+}
+
+/** One field of a storage destination form; the panel drives the shape. */
+export interface BackupStorageField {
+  key: string;
+  label: string;
+  hint?: string;
+  type: "text" | "password" | "boolean" | "number" | string;
+  required: boolean;
+  default?: string;
+}
+
+export interface BackupStorageUsage {
+  backup_id: string;
+  backup_name: string;
+  server_id: string;
+}
+
+export interface BackupStorage {
+  storage_id: string;
+  created: string;
+  name: string;
+  kind: string;
+  prefix: string;
+  settings: Record<string, string>;
+  /** Which settings hold secrets — those come back masked. */
+  secrets?: Record<string, boolean>;
+  enabled: boolean;
+  default: boolean;
+  /** Panel identity the archives are namespaced under. */
+  cluster_id: string;
+  location?: string;
+  namespace?: string;
+  fields: BackupStorageField[];
+  used_by?: BackupStorageUsage[];
+}
+
+/** An archive as the panel reports it: local cache, destination, or both. */
+export interface BackupArchive {
+  name: string;
+  size: number;
+  modified: string;
+  path?: string;
+  type: string;
+  source: "local" | "remote" | "both" | string;
 }
 
 export interface TaskView {

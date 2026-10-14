@@ -11,9 +11,9 @@ import (
 
 const createBackup = `-- name: CreateBackup :one
 INSERT INTO backups (backup_id, created, backup_name, backup_location, excluded_dirs, max_backups, server_id,
-  compress, shutdown, before, after, "default", status, enabled, backup_type)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING backup_id, created, backup_name, backup_location, excluded_dirs, max_backups, server_id, compress, shutdown, "before", "after", "default", status, enabled, backup_type
+  compress, shutdown, before, after, "default", status, enabled, backup_type, storage_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING backup_id, created, backup_name, backup_location, excluded_dirs, max_backups, server_id, compress, shutdown, "before", "after", "default", status, enabled, backup_type, storage_id
 `
 
 type CreateBackupParams struct {
@@ -32,6 +32,7 @@ type CreateBackupParams struct {
 	Status         *string
 	Enabled        int64
 	BackupType     string
+	StorageID      string
 }
 
 func (q *Queries) CreateBackup(ctx context.Context, arg CreateBackupParams) (Backup, error) {
@@ -51,6 +52,7 @@ func (q *Queries) CreateBackup(ctx context.Context, arg CreateBackupParams) (Bac
 		arg.Status,
 		arg.Enabled,
 		arg.BackupType,
+		arg.StorageID,
 	)
 	var i Backup
 	err := row.Scan(
@@ -69,6 +71,7 @@ func (q *Queries) CreateBackup(ctx context.Context, arg CreateBackupParams) (Bac
 		&i.Status,
 		&i.Enabled,
 		&i.BackupType,
+		&i.StorageID,
 	)
 	return i, err
 }
@@ -161,7 +164,7 @@ func (q *Queries) DeleteWebhooksForServer(ctx context.Context, serverID string) 
 }
 
 const getBackup = `-- name: GetBackup :one
-SELECT backup_id, created, backup_name, backup_location, excluded_dirs, max_backups, server_id, compress, shutdown, "before", "after", "default", status, enabled, backup_type FROM backups WHERE backup_id = ?
+SELECT backup_id, created, backup_name, backup_location, excluded_dirs, max_backups, server_id, compress, shutdown, "before", "after", "default", status, enabled, backup_type, storage_id FROM backups WHERE backup_id = ?
 `
 
 func (q *Queries) GetBackup(ctx context.Context, backupID string) (Backup, error) {
@@ -183,12 +186,13 @@ func (q *Queries) GetBackup(ctx context.Context, backupID string) (Backup, error
 		&i.Status,
 		&i.Enabled,
 		&i.BackupType,
+		&i.StorageID,
 	)
 	return i, err
 }
 
 const getDefaultBackup = `-- name: GetDefaultBackup :one
-SELECT backup_id, created, backup_name, backup_location, excluded_dirs, max_backups, server_id, compress, shutdown, "before", "after", "default", status, enabled, backup_type FROM backups WHERE server_id = ? AND default = 1 LIMIT 1
+SELECT backup_id, created, backup_name, backup_location, excluded_dirs, max_backups, server_id, compress, shutdown, "before", "after", "default", status, enabled, backup_type, storage_id FROM backups WHERE server_id = ? AND "default" = 1 LIMIT 1
 `
 
 func (q *Queries) GetDefaultBackup(ctx context.Context, serverID string) (Backup, error) {
@@ -210,6 +214,7 @@ func (q *Queries) GetDefaultBackup(ctx context.Context, serverID string) (Backup
 		&i.Status,
 		&i.Enabled,
 		&i.BackupType,
+		&i.StorageID,
 	)
 	return i, err
 }
@@ -238,7 +243,7 @@ func (q *Queries) GetWebhook(ctx context.Context, webhookID string) (Webhook, er
 }
 
 const listBackupsForServer = `-- name: ListBackupsForServer :many
-SELECT backup_id, created, backup_name, backup_location, excluded_dirs, max_backups, server_id, compress, shutdown, "before", "after", "default", status, enabled, backup_type FROM backups WHERE server_id = ? ORDER BY created
+SELECT backup_id, created, backup_name, backup_location, excluded_dirs, max_backups, server_id, compress, shutdown, "before", "after", "default", status, enabled, backup_type, storage_id FROM backups WHERE server_id = ? ORDER BY created
 `
 
 func (q *Queries) ListBackupsForServer(ctx context.Context, serverID string) ([]Backup, error) {
@@ -266,6 +271,7 @@ func (q *Queries) ListBackupsForServer(ctx context.Context, serverID string) ([]
 			&i.Status,
 			&i.Enabled,
 			&i.BackupType,
+			&i.StorageID,
 		); err != nil {
 			return nil, err
 		}
@@ -373,7 +379,7 @@ func (q *Queries) SetBackupStatus(ctx context.Context, arg SetBackupStatusParams
 }
 
 const unsetDefaultBackups = `-- name: UnsetDefaultBackups :exec
-UPDATE backups SET default = 0 WHERE server_id = ?
+UPDATE backups SET "default" = 0 WHERE server_id = ?
 `
 
 func (q *Queries) UnsetDefaultBackups(ctx context.Context, serverID string) error {
@@ -383,7 +389,8 @@ func (q *Queries) UnsetDefaultBackups(ctx context.Context, serverID string) erro
 
 const updateBackup = `-- name: UpdateBackup :exec
 UPDATE backups SET backup_name = ?, backup_location = ?, excluded_dirs = ?, max_backups = ?, compress = ?,
-  shutdown = ?, before = ?, after = ?, default = ?, status = ?, enabled = ?, backup_type = ? WHERE backup_id = ?
+  shutdown = ?, "before" = ?, "after" = ?, "default" = ?, status = ?, enabled = ?, backup_type = ?,
+  storage_id = ? WHERE backup_id = ?
 `
 
 type UpdateBackupParams struct {
@@ -399,6 +406,7 @@ type UpdateBackupParams struct {
 	Status         *string
 	Enabled        int64
 	BackupType     string
+	StorageID      string
 	BackupID       string
 }
 
@@ -416,6 +424,7 @@ func (q *Queries) UpdateBackup(ctx context.Context, arg UpdateBackupParams) erro
 		arg.Status,
 		arg.Enabled,
 		arg.BackupType,
+		arg.StorageID,
 		arg.BackupID,
 	)
 	return err

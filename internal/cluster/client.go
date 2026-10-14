@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
+	"github.com/FlameInTheDark/servy/internal/backups"
 	pb "github.com/FlameInTheDark/servy/internal/cluster/pb"
 	"github.com/FlameInTheDark/servy/internal/logging"
 )
@@ -564,11 +565,14 @@ func (c *Client) FileOp(nodeID, serverID, op, path, dst string, paths []string) 
 /* --------------------------------- backups -------------------------------- */
 
 // BackupRun triggers a backup job on the node and returns the updated metadata.
-func (c *Client) BackupRun(nodeID, serverID, backupID string, meta interface{}) (json.RawMessage, error) {
-	raw, err := json.Marshal(meta)
+// The bundle carries the storage destination and retention counts, so the node
+// uploads the archive itself.
+func (c *Client) BackupRun(nodeID, serverID, backupID string, bundle backups.Bundle) (json.RawMessage, error) {
+	payload, err := backups.EncodeBundle(bundle)
 	if err != nil {
 		return nil, err
 	}
+	raw := []byte(payload)
 	ctx, cancel, cl, err := c.longCtx(nodeID)
 	if err != nil {
 		return nil, err
@@ -585,14 +589,19 @@ func (c *Client) BackupRun(nodeID, serverID, backupID string, meta interface{}) 
 	return json.RawMessage(reply.Payload), nil
 }
 
-// BackupRestore restores a backup on the node.
-func (c *Client) BackupRestore(nodeID, serverID, backupID, archive string) error {
+// BackupRestore restores a backup on the node. The bundle lets the node pull an
+// archive back from the storage destination when its local cache rotated it away.
+func (c *Client) BackupRestore(nodeID, serverID, backupID, archive string, bundle backups.Bundle) error {
+	payload, err := backups.EncodeBundle(bundle)
+	if err != nil {
+		return err
+	}
 	ctx, cancel, cl, err := c.longCtx(nodeID)
 	if err != nil {
 		return err
 	}
 	defer cancel()
-	reply, err := cl.BackupRestore(ctx, &pb.BackupRef{ServerId: serverID, BackupId: backupID, Archive: archive})
+	reply, err := cl.BackupRestore(ctx, &pb.BackupRef{ServerId: serverID, BackupId: backupID, Archive: archive, Payload: payload})
 	if err != nil {
 		c.markTransportError(nodeID, "", err)
 		return err
@@ -603,14 +612,19 @@ func (c *Client) BackupRestore(nodeID, serverID, backupID, archive string) error
 	return nil
 }
 
-// BackupDelete removes a backup (optionally its files) on the node.
-func (c *Client) BackupDelete(nodeID, serverID, backupID string, removeFiles bool) error {
+// BackupDelete removes a backup (optionally its files) on the node, including
+// the archives the bundle's destination holds for that server.
+func (c *Client) BackupDelete(nodeID, serverID, backupID string, removeFiles bool, bundle backups.Bundle) error {
+	payload, err := backups.EncodeBundle(bundle)
+	if err != nil {
+		return err
+	}
 	ctx, cancel, cl, err := c.longCtx(nodeID)
 	if err != nil {
 		return err
 	}
 	defer cancel()
-	reply, err := cl.BackupDelete(ctx, &pb.BackupRef{ServerId: serverID, BackupId: backupID, RemoveFiles: removeFiles})
+	reply, err := cl.BackupDelete(ctx, &pb.BackupRef{ServerId: serverID, BackupId: backupID, RemoveFiles: removeFiles, Payload: payload})
 	if err != nil {
 		c.markTransportError(nodeID, "", err)
 		return err
@@ -623,13 +637,17 @@ func (c *Client) BackupDelete(nodeID, serverID, backupID string, removeFiles boo
 
 // BackupFiles lists the archives stored on the node; when archive is set it
 // lists the members inside that archive instead.
-func (c *Client) BackupFiles(nodeID, serverID, backupID, archive string) (json.RawMessage, error) {
+func (c *Client) BackupFiles(nodeID, serverID, backupID, archive string, bundle backups.Bundle) (json.RawMessage, error) {
+	payload, err := backups.EncodeBundle(bundle)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel, cl, err := c.ctx(nodeID)
 	if err != nil {
 		return nil, err
 	}
 	defer cancel()
-	reply, err := cl.BackupFiles(ctx, &pb.BackupRef{ServerId: serverID, BackupId: backupID, Archive: archive})
+	reply, err := cl.BackupFiles(ctx, &pb.BackupRef{ServerId: serverID, BackupId: backupID, Archive: archive, Payload: payload})
 	if err != nil {
 		c.markTransportError(nodeID, "", err)
 		return nil, err
@@ -640,14 +658,19 @@ func (c *Client) BackupFiles(nodeID, serverID, backupID, archive string) (json.R
 	return json.RawMessage(reply.Payload), nil
 }
 
-// BackupRead downloads an archive file from the node.
-func (c *Client) BackupRead(nodeID, serverID, backupID, path string) ([]byte, error) {
+// BackupRead downloads an archive file from the node. When the archive only
+// exists in the storage destination the node fetches it first.
+func (c *Client) BackupRead(nodeID, serverID, backupID, path string, bundle backups.Bundle) ([]byte, error) {
+	payload, err := backups.EncodeBundle(bundle)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel, cl, err := c.longCtx(nodeID)
 	if err != nil {
 		return nil, err
 	}
 	defer cancel()
-	stream, err := cl.BackupRead(ctx, &pb.BackupReadRequest{ServerId: serverID, BackupId: backupID, Path: path})
+	stream, err := cl.BackupRead(ctx, &pb.BackupReadRequest{ServerId: serverID, BackupId: backupID, Path: path, Payload: payload})
 	if err != nil {
 		c.markTransportError(nodeID, "", err)
 		return nil, err

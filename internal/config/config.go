@@ -10,8 +10,10 @@ import (
         "fmt"
         "os"
         "path/filepath"
+        "strings"
         "sync"
 
+        "github.com/google/uuid"
         "gopkg.in/yaml.v3"
 )
 
@@ -45,6 +47,18 @@ type Config struct {
 
         BigBucketRepo    string `yaml:"big_bucket_repo" json:"big_bucket_repo"`         // server download manifest source
         DockerSteamImage string `yaml:"docker_steam_image" json:"docker_steam_image"`   // image used to run SteamCMD jobs
+
+        // Backup storage: when a backup uploads to a storage destination the
+        // local archive only stays as a cache for that many backups per server,
+        // while the destination keeps its own history.
+        BackupLocalKeep  int `yaml:"backup_local_keep" json:"backup_local_keep"`
+        BackupRemoteKeep int `yaml:"backup_remote_keep" json:"backup_remote_keep"`
+
+        // ClusterID identifies this panel inside shared backup storages. Every
+        // object is written below <prefix>/<cluster_id>/<server_id>/, so panels
+        // that share one bucket or FTP account never overlap. Generated on the
+        // first start and kept forever.
+        ClusterID string `yaml:"cluster_id" json:"cluster_id"`
 
         VirtualTerminalLines    int            `yaml:"virtual_terminal_lines" json:"virtual_terminal_lines"` // console scrollback buffer
         Keywords                []string       `yaml:"terminal_keywords" json:"terminal_keywords"`           // console keyword highlighting
@@ -80,8 +94,11 @@ var Categories = map[string][]string{
         "servers": {
                 "big_bucket_repo", "java_extra_paths", "docker_steam_image",
         },
+        "backups": {
+                "backup_local_keep", "backup_remote_keep",
+        },
         "cluster": {
-                "grpc_enabled", "grpc_port",
+                "grpc_enabled", "grpc_port", "cluster_id",
         },
 }
 
@@ -110,6 +127,9 @@ func Default() *Config {
 
                 BigBucketRepo:    "https://jars.arcadiatech.org",
                 DockerSteamImage: "steamcmd/steamcmd:latest",
+
+                BackupLocalKeep:  1,
+                BackupRemoteKeep: 5,
 
                 VirtualTerminalLines: 200,
                 Keywords:             []string{"ERROR", "WARN", "FATAL", "SEVERE"},
@@ -148,10 +168,17 @@ func Load(path string) (*Manager, error) {
         default:
                 return nil, err
         }
+        hadClusterID := cfg.ClusterID != ""
         if err := cfg.sanitize(); err != nil {
                 return nil, err
         }
-        return &Manager{cfg: cfg, path: path}, nil
+        m := &Manager{cfg: cfg, path: path}
+        if !hadClusterID && path != "" {
+                // The cluster id namespaces every uploaded archive; persist the
+                // freshly generated one so it survives restarts.
+                m.Set(cfg)
+        }
+        return m, nil
 }
 
 // NewManager builds a manager around an already-loaded config (tests).
@@ -295,5 +322,34 @@ func (c *Config) sanitize() error {
         if c.SamplingFallbackDivisor <= 0 {
                 c.SamplingFallbackDivisor = 12
         }
+        if c.BackupLocalKeep < 0 {
+                c.BackupLocalKeep = 0
+        }
+        if c.BackupRemoteKeep < 0 {
+                c.BackupRemoteKeep = 0
+        }
+        c.ClusterID = sanitizeClusterID(c.ClusterID)
         return nil
+}
+
+// sanitizeClusterID keeps the id usable as one path segment of an object key
+// and generates a fresh one when it is missing.
+func sanitizeClusterID(id string) string {
+        keep := func(r rune) rune {
+                switch {
+                case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+                        return r
+                default:
+                        return '-'
+                }
+        }
+        cleaned := strings.Map(keep, strings.TrimSpace(id))
+        cleaned = strings.Trim(cleaned, "-")
+        if cleaned == "" {
+                cleaned = "cluster-" + strings.SplitN(uuid.NewString(), "-", 2)[0]
+        }
+        if len(cleaned) > 64 {
+                cleaned = cleaned[:64]
+        }
+        return cleaned
 }
