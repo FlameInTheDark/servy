@@ -1,3 +1,10 @@
+# [1.3.0](https://github.com/FlameInTheDark/servy/compare/v1.2.0...v1.3.0) (2026-10-14)
+
+
+### Features
+
+* added more game servers ([30a26fe](https://github.com/FlameInTheDark/servy/commit/30a26febd3436502d834d2c59ba8fed0c63ce480))
+
 # [1.2.0](https://github.com/FlameInTheDark/servy/compare/v1.1.0...v1.2.0) (2026-10-13)
 
 
