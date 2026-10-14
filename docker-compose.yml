@@ -19,7 +19,7 @@ services:
     restart: unless-stopped
     ports:
       - "8443:8443"          # web UI + REST API + websocket
-      - "50051:50051"        # cluster gRPC (agents connect here)
+      - "5055:5055"          # cluster node API (grpc_port); nodes dial this
       - "25500-25600:25500-25600"   # Minecraft / game server port range
       - "25500-25600:25500-25600/udp"
       #- "2456-2457:2456-2457/udp"   # Valheim (game port + query port)

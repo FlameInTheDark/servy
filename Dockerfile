@@ -147,7 +147,8 @@ ENV PATH="/usr/local/bin:${PATH}"
 WORKDIR /data
 VOLUME ["/data"]
 
-EXPOSE 8443 50051 19132/udp 25500-25600
+# panel 8443 · cluster node API 5055 (grpc_port) · Bedrock 19132/udp · game range
+EXPOSE 8443 5055 19132/udp 25500-25600
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8443/status || exit 1
@@ -158,7 +159,7 @@ LABEL org.opencontainers.image.title="Servy" \
       org.opencontainers.image.revision=${COMMIT} \
       org.opencontainers.image.created=${BUILD_DATE} \
       org.opencontainers.image.source="https://github.com/FlameInTheDark/servy" \
-      org.opencontainers.image.licenses="GPL-3.0"
+      org.opencontainers.image.licenses="MIT"
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/servy"]
 CMD ["--data", "/data", "serve"]
