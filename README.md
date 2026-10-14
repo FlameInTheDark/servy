@@ -33,6 +33,17 @@ Open **http://localhost:8443** → follow the wizard → create a server (zip im
 
 ### Docker
 
+One-liner — no clone needed (Linux/macOS shell, Docker Compose v2):
+
+```bash
+mkdir -p servy && cd servy && curl -fsSLO https://raw.githubusercontent.com/FlameInTheDark/servy/main/docker-compose.yml && docker compose up -d
+```
+
+Open **http://localhost:8443** for the setup wizard. Panel data lives in `./data` next to the compose file, so run later
+`docker compose` commands (`pull`, `logs`, `down`) from that same `servy/` directory.
+
+Already cloned the repo? Just run:
+
 ```bash
 docker compose up -d
 ```
