@@ -1,0 +1,24 @@
+app_id: 739590
+slug: "eco"
+name: "Eco"
+run_command: "./EcoServer -nogui"
+executable: "EcoServer"
+stop_command: "exit"
+port: 3001
+port_name: "game"
+notes: "Game 3001/udp, web UI and API on 3000/tcp. Configure name, password and ports in Configs/Network.eco. Linux build requires the server to be started once so Configs/ is created."
+config_files:
+  - "Configs/Network.eco"
+  - "Configs/Difficulty.eco"
+  - "Configs/Users.eco"
+  - "Configs/Rules.eco"
+  - "Configs/WorldGenerator.eco"
+expose:
+  - proto: udp
+  - port: 3000
+    proto: tcp
+save_dirs:
+  - "Storage"
+backup_dirs:
+  - "Storage"
+  - "Configs"

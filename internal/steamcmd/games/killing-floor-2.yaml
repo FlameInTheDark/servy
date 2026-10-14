@@ -1,0 +1,30 @@
+app_id: 232130
+slug: "killing-floor-2"
+name: "Killing Floor 2"
+# The first token is a travel string: KF-BioticsLab is the starting map, Difficulty 0-3, GameLength 0/1/2 (short/normal/long).
+run_command: "./Binaries/Win64/KFGameSteamServer.bin.x86_64 KF-BioticsLab?Difficulty=0?GameLength=1 -Port={PORT} -QueryPort={QUERY_PORT}"
+executable: "Binaries/Win64/KFGameSteamServer.bin.x86_64"
+stop_command: "quit"
+port: 7777
+port_name: "game"
+query_port: 27015
+notes: "Game 7777/udp, Steam query 27015/udp, web admin 8080/tcp (enable in LinuxServer-KFWeb.ini), Steam port 20560/udp. Server name and password live in KFGame/Config/LinuxServer-KFGame.ini (created on first start)."
+config_files:
+  - "KFGame/Config/LinuxServer-KFGame.ini"
+  - "KFGame/Config/LinuxServer-KFEngine.ini"
+  - "KFGame/Config/LinuxServer-KFWeb.ini"
+expose:
+  - proto: udp
+  - port: 27015
+    proto: udp
+  - port: 20560
+    proto: udp
+    optional: true
+  - port: 8080
+    proto: tcp
+    optional: true
+save_dirs:
+  - "KFGame/Config"
+  - "KFGame/Saved"
+backup_dirs:
+  - "KFGame/Config"

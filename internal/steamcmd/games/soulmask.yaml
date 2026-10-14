@@ -1,0 +1,54 @@
+app_id: 3017310
+slug: "soulmask"
+name: "Soulmask"
+run_command: "./WSServer.sh Level01_Main -server -log -UTF8Output -forcepassthrough -online=STEAM -Port={PORT} -QueryPort={QUERY_PORT} -EchoPort=18888 -saving=600 -backup=900"
+executable: "WSServer.sh"
+stop_command: "quit"
+port: 8777
+port_name: "game"
+query_port: 27015
+notes: "Game 8777/udp, Steam query 27015/udp, admin echo port 18888/tcp. Passwords are optional launch options."
+launch_options:
+  - key: server_name
+    label: Server name
+    description: "Name shown in the server browser; uses the name from the creation form."
+    type: text
+    source: server_name
+    flag: -SteamServerName
+    flag_separator: "="
+  - key: max_players
+    label: Maximum players
+    description: "Maximum simultaneous players."
+    type: number
+    flag: -MaxPlayers
+    flag_separator: "="
+    default: "50"
+    min: 1
+    max: 100
+  - key: join_password
+    label: Join password
+    description: "Leave blank for a public server."
+    type: password
+    flag: -PSW
+    flag_separator: "="
+    max_length: 64
+  - key: admin_password
+    label: Admin password
+    description: "Password for in-game GM/admin commands."
+    type: password
+    flag: -adminpsw
+    flag_separator: "="
+    max_length: 64
+expose:
+  - proto: udp
+  - port: 27015
+    proto: udp
+  - port: 18888
+    proto: tcp
+    optional: true
+save_dirs:
+  - "WS/Saved/Worlds"
+backup_dirs:
+  - "WS/Saved/Worlds"
+  - "WS/Saved/Config"
+  - "WS/Saved/GameplaySettings"

@@ -1,0 +1,39 @@
+app_id: 403240
+slug: "squad"
+name: "Squad"
+run_command: "./SquadGameServer.sh Port={PORT} QueryPort={QUERY_PORT} RANDOM=NONE -log"
+executable: "SquadGameServer.sh"
+stop_command: "quit"
+port: 7787
+port_name: "game"
+query_port: 27165
+notes: "Game 7787/udp, query 27165/udp, RCON 21114/tcp. Server name, passwords and rotation live in SquadGame/ServerConfig/Server.cfg (created on first start)."
+launch_options:
+  - key: max_players
+    label: Maximum players
+    description: "Fixed player cap."
+    type: number
+    flag: FIXEDMAXPLAYERS
+    flag_separator: "="
+    default: "80"
+    min: 2
+    max: 100
+config_files:
+  - "SquadGame/ServerConfig/Server.cfg"
+  - "SquadGame/ServerConfig/Admins.cfg"
+  - "SquadGame/ServerConfig/MapRotation.cfg"
+  - "SquadGame/ServerConfig/Rcon.cfg"
+  - "SquadGame/ServerConfig/ServerMessages.cfg"
+expose:
+  - proto: udp
+  - port: 27165
+    proto: udp
+  - port: 21114
+    proto: tcp
+    optional: true
+save_dirs:
+  - "SquadGame/Saved"
+  - "SquadGame/ServerConfig"
+backup_dirs:
+  - "SquadGame/ServerConfig"
+  - "SquadGame/Saved/Config"

@@ -1,0 +1,55 @@
+app_id: 233780
+slug: "arma3"
+name: "Arma 3"
+run_command: "./arma3server_x64 -name=server -port={PORT}"
+executable: "arma3server_x64"
+stop_command: "#shutdown"
+port: 2302
+port_name: "game"
+notes: "Game 2302/udp, Steam query 2303/udp, plus 2304-2306/udp. Create a server.cfg yourself (Files tab) and set the Config file launch option to server.cfg to name the server and set passwords."
+launch_options:
+  - key: config
+    label: Config file
+    description: "Server config file relative to the server directory, e.g. server.cfg. Leave blank to run with defaults."
+    type: text
+    flag: -config
+    flag_separator: "="
+    max_length: 128
+  - key: mods
+    label: Mods
+    description: "Semicolon-separated client mod folders, e.g. @CBA_A3;@ace. Leave blank for none."
+    type: text
+    flag: -mod
+    flag_separator: "="
+    max_length: 1024
+  - key: server_mods
+    label: Server-side mods
+    description: "Semicolon-separated server-only mod folders. Leave blank for none."
+    type: text
+    flag: -serverMod
+    flag_separator: "="
+    max_length: 1024
+config_files:
+  - "server.cfg"
+  - "basic.cfg"
+expose:
+  - proto: udp
+  - offset: 1
+    proto: udp
+  - offset: 2
+    proto: udp
+    optional: true
+  - offset: 3
+    proto: udp
+    optional: true
+  - offset: 4
+    proto: udp
+    optional: true
+save_dirs:
+  - "mpmissions"
+  - "profiles"
+backup_dirs:
+  - "server.cfg"
+  - "basic.cfg"
+  - "profiles"
+  - "mpmissions"

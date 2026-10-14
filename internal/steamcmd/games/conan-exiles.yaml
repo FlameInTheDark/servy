@@ -1,0 +1,40 @@
+app_id: 443030
+slug: "conan-exiles"
+name: "Conan Exiles"
+run_command: "./ConanSandbox/Binaries/Win64/ConanSandboxServer-Win64-Shipping.exe -log -Port={PORT} -QueryPort={QUERY_PORT}"
+executable: "ConanSandbox/Binaries/Win64/ConanSandboxServer-Win64-Shipping.exe"
+stop_command: "quit"
+port: 7777
+port_name: "game"
+query_port: 27015
+platform: "windows"
+windows_only: true
+docker_image: "ghcr.io/flameinthedark/servy-wine:latest"
+notes: "Windows-only dedicated server (Wine). Game 7777/udp + 7778/udp raw, query 27015/udp, RCON 25575/tcp. Server name and passwords are in ConanSandbox/Saved/Config/WindowsServer/ServerSettings.ini and Engine.ini."
+launch_options:
+  - key: max_players
+    label: Maximum players
+    description: "Maximum simultaneous players."
+    type: number
+    flag: -MaxPlayers
+    flag_separator: "="
+    default: "40"
+    min: 1
+    max: 70
+config_files:
+  - "ConanSandbox/Saved/Config/WindowsServer/ServerSettings.ini"
+  - "ConanSandbox/Saved/Config/WindowsServer/Engine.ini"
+  - "ConanSandbox/Saved/Config/WindowsServer/Game.ini"
+expose:
+  - proto: udp
+  - offset: 1
+    proto: udp
+  - port: 27015
+    proto: udp
+  - port: 25575
+    proto: tcp
+    optional: true
+save_dirs:
+  - "ConanSandbox/Saved"
+backup_dirs:
+  - "ConanSandbox/Saved"

@@ -1,0 +1,23 @@
+app_id: 728470
+slug: "astroneer"
+name: "Astroneer"
+run_command: "./AstroServer.exe -log"
+executable: "AstroServer.exe"
+stop_command: "quit"
+port: 8777
+port_name: "game"
+platform: "windows"
+windows_only: true
+docker_image: "ghcr.io/flameinthedark/servy-wine:latest"
+notes: "Windows-only dedicated server (Wine). 8777/tcp+udp. Set OwnerName, OwnerGuid, ServerName and PublicIP in Astro/Saved/Config/WindowsServer/AstroServerSettings.ini after first start, then restart."
+config_files:
+  - "Astro/Saved/Config/WindowsServer/AstroServerSettings.ini"
+  - "Astro/Saved/Config/WindowsServer/Engine.ini"
+expose:
+  - proto: tcp
+  - proto: udp
+save_dirs:
+  - "Astro/Saved/SaveGames"
+backup_dirs:
+  - "Astro/Saved/SaveGames"
+  - "Astro/Saved/Config"

@@ -1,0 +1,82 @@
+app_id: 222860
+slug: "l4d2"
+name: "Left 4 Dead 2"
+# Source dedicated server. srcds_run -norestart stops srcds_run from relaunching the server behind Servy's back.
+run_command: "./srcds_run -game left4dead2 -console -port {PORT} -strictportbind -norestart"
+executable: "srcds_run"
+stop_command: "quit"
+port: 27015
+port_name: "game"
+notes: "Source engine server. Game traffic, A2S queries and RCON all use the game port (UDP + TCP). Put your server.cfg in left4dead2/cfg/."
+launch_options:
+  - key: server_name
+    label: Server name
+    description: "Name shown in the server browser; uses the name from the creation form."
+    type: text
+    source: server_name
+    flag: +hostname
+  - key: map
+    label: Startup map
+    description: "Map loaded when the server starts."
+    type: text
+    flag: +map
+    default: "c1m1_hotel"
+    min_length: 1
+    max_length: 128
+  - key: max_players
+    label: Maximum players
+    description: "Maximum simultaneous players."
+    type: number
+    flag: +maxplayers
+    default: "8"
+    min: 1
+    max: 18
+  - key: gamemode
+    label: Game mode
+    description: "Starting game mode."
+    type: select
+    flag: +mp_gamemode
+    default: "coop"
+    options:
+      - value: "coop"
+        label: "Co-op campaign"
+      - value: "versus"
+        label: "Versus"
+      - value: "survival"
+        label: "Survival"
+      - value: "scavenge"
+        label: "Scavenge"
+      - value: "realism"
+        label: "Realism"
+  - key: rcon_password
+    label: RCON password
+    description: "Remote console password. Leave blank to disable RCON."
+    type: password
+    flag: +rcon_password
+    max_length: 64
+  - key: sv_password
+    label: Join password
+    description: "Password players need to join. Leave blank for a public server."
+    type: password
+    flag: +sv_password
+    max_length: 64
+  - key: gslt
+    label: Game Server Login Token
+    description: "Optional GSLT from steamcommunity.com/dev/managegameservers; needed to appear in the public browser for most Source games."
+    type: password
+    flag: +sv_setsteamaccount
+    max_length: 64
+config_files:
+  - "left4dead2/cfg/server.cfg"
+# Source engines serve game + A2S on UDP and RCON on TCP, all on the one game port.
+expose:
+  - proto: tcp
+  - proto: udp
+save_dirs:
+  - "left4dead2/cfg"
+  - "left4dead2/maps"
+  - "left4dead2/addons"
+backup_dirs:
+  - "left4dead2/cfg"
+  - "left4dead2/addons"
+  - "left4dead2/maps"

@@ -1,0 +1,26 @@
+app_id: 1874900
+slug: "arma-reforger"
+name: "Arma Reforger"
+run_command: "./ArmaReforgerServer -config config.json -profile profile -maxFPS 60"
+executable: "ArmaReforgerServer"
+stop_command: "quit"
+port: 2001
+port_name: "game"
+notes: "Needs a config.json in the server folder (Files tab) containing the scenario, name, passwords and ports (bindPort 2001, a2s 17777, rcon 19999). Mods are downloaded by the server on first start."
+config_editors:
+  - path: "config.json"
+    label: "Server config"
+    description: "Scenario, name, passwords and ports. The server will not start without it."
+    editor: raw
+expose:
+  - proto: udp
+  - port: 17777
+    proto: udp
+  - port: 19999
+    proto: udp
+    optional: true
+save_dirs:
+  - "profile"
+backup_dirs:
+  - "config.json"
+  - "profile"

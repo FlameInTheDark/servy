@@ -1,0 +1,26 @@
+app_id: 2465200
+slug: "sons-of-the-forest"
+name: "Sons of the Forest"
+run_command: "./SonsOfTheForestDS.exe -userdatapath {SAVE_DIR}"
+executable: "SonsOfTheForestDS.exe"
+stop_command: "quit"
+port: 8766
+port_name: "game"
+query_port: 27016
+platform: "windows"
+windows_only: true
+docker_image: "ghcr.io/flameinthedark/servy-wine:latest"
+notes: "Windows-only dedicated server (Wine). Game 8766/udp, query 27016/udp, blob sync 9700/udp. dedicatedserver.cfg is written under the saves folder on first start; edit name, password and slots there."
+config_files:
+  - "saves/dedicatedserver.cfg"
+  - "saves/ownerswhitelist.txt"
+expose:
+  - proto: udp
+  - port: 27016
+    proto: udp
+  - port: 9700
+    proto: udp
+save_dirs:
+  - "saves"
+backup_dirs:
+  - "saves"

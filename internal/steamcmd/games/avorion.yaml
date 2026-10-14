@@ -1,0 +1,49 @@
+app_id: 565060
+slug: "avorion"
+name: "Avorion"
+run_command: "./bin/AvorionServer --datapath {SAVE_DIR} --port {PORT}"
+executable: "bin/AvorionServer"
+stop_command: "/stop"
+port: 27000
+port_name: "game"
+env:
+  LD_LIBRARY_PATH: ["./linux64", "mode:append"]
+notes: "Needs 27000/tcp+udp, 27003/udp, 27020/udp and 27021/udp. Galaxy settings are in the galaxy folder under saves/. Set --admin to your Steam64 ID to get admin rights."
+launch_options:
+  - key: galaxy_name
+    label: Galaxy name
+    description: "Galaxy save name. Use an existing name to load that galaxy."
+    type: text
+    flag: --galaxy-name
+    default: "avorion_galaxy"
+    min_length: 1
+    max_length: 64
+  - key: admin
+    label: Admin Steam64 ID
+    description: "Steam64 ID granted admin rights. Leave blank for none."
+    type: text
+    flag: --admin
+    max_length: 32
+  - key: max_players
+    label: Maximum players
+    description: "Maximum simultaneous players."
+    type: number
+    flag: --max-players
+    default: "10"
+    min: 1
+    max: 100
+expose:
+  - proto: tcp
+  - proto: udp
+  - offset: 3
+    proto: udp
+  - port: 27020
+    proto: udp
+    optional: true
+  - port: 27021
+    proto: udp
+    optional: true
+save_dirs:
+  - "saves"
+backup_dirs:
+  - "saves"

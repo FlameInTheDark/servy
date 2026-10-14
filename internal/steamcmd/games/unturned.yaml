@@ -1,0 +1,21 @@
+app_id: 1110390
+slug: "unturned"
+name: "Unturned"
+# Unturned reads its server folder name after +InternetServer/. Keep it simple (no spaces); all settings live under Servers/servy/.
+run_command: "./Unturned_Headless.x86_64 -batchmode -nographics +InternetServer/servy"
+executable: "Unturned_Headless.x86_64"
+stop_command: "shutdown"
+port: 27015
+port_name: "game"
+notes: "Game port 27015/udp plus 27016/udp. Set Port, Name, Password and Map in Servers/servy/Server/Commands.dat after first start. The server folder name is fixed to 'servy'."
+config_files:
+  - "Servers/servy/Server/Commands.dat"
+  - "Servers/servy/Config.json"
+expose:
+  - proto: udp
+  - offset: 1
+    proto: udp
+save_dirs:
+  - "Servers/servy"
+backup_dirs:
+  - "Servers/servy"

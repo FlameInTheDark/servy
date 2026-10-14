@@ -1,0 +1,29 @@
+app_id: 2430930
+slug: "ark-asa"
+name: "ARK: Survival Ascended"
+# Same travel-string shape as ARK: SE. TheIsland_WP is the starting map; edit it for Scorched Earth, The Center, etc.
+run_command: "./ShooterGame/Binaries/Win64/ArkAscendedServer.exe TheIsland_WP?listen?SessionName={SERVER_NAME}?Port={PORT}?QueryPort={QUERY_PORT} -server -log -WinLiveMaxPlayers=70 -NoBattlEye"
+executable: "ShooterGame/Binaries/Win64/ArkAscendedServer.exe"
+stop_command: "quit"
+port: 7777
+port_name: "game"
+query_port: 27015
+platform: "windows"
+windows_only: true
+docker_image: "ghcr.io/flameinthedark/servy-wine:latest"
+notes: "Windows-only dedicated server (Wine). Game 7777/udp, query 27015/udp, RCON 27020/tcp. Passwords and rates go in ShooterGame/Saved/Config/WindowsServer/GameUserSettings.ini. ASA needs a lot of RAM (16 GB+)."
+config_files:
+  - "ShooterGame/Saved/Config/WindowsServer/GameUserSettings.ini"
+  - "ShooterGame/Saved/Config/WindowsServer/Game.ini"
+expose:
+  - proto: udp
+  - port: 27015
+    proto: udp
+  - port: 27020
+    proto: tcp
+    optional: true
+save_dirs:
+  - "ShooterGame/Saved/SavedArks"
+backup_dirs:
+  - "ShooterGame/Saved/SavedArks"
+  - "ShooterGame/Saved/Config"

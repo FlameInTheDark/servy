@@ -1,0 +1,25 @@
+app_id: 629800
+slug: "mordhau"
+name: "Mordhau"
+run_command: "./MordhauServer.sh -log -Port={PORT} -QueryPort={QUERY_PORT} -BeaconPort=15000"
+executable: "MordhauServer.sh"
+stop_command: "quit"
+port: 7777
+port_name: "game"
+query_port: 27015
+notes: "Game 7777/udp, query 27015/udp, beacon 15000/udp. Name, password and rotation are in Mordhau/Saved/Config/LinuxServer/Game.ini."
+config_files:
+  - "Mordhau/Saved/Config/LinuxServer/Game.ini"
+  - "Mordhau/Saved/Config/LinuxServer/Engine.ini"
+  - "Mordhau/Saved/Config/LinuxServer/Admins.ini"
+  - "Mordhau/Saved/Config/LinuxServer/Bans.ini"
+expose:
+  - proto: udp
+  - port: 27015
+    proto: udp
+  - port: 15000
+    proto: udp
+save_dirs:
+  - "Mordhau/Saved"
+backup_dirs:
+  - "Mordhau/Saved/Config"

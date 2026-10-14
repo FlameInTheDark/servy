@@ -1,0 +1,44 @@
+app_id: 1169370
+slug: "necesse"
+name: "Necesse"
+run_command: "./StartServer-nogui.sh -localdir -port {PORT}"
+executable: "StartServer-nogui.sh"
+stop_command: "exit"
+port: 14159
+port_name: "game"
+notes: "Game port 14159/udp. -localdir keeps saves next to the server files. Re-running with the same World name loads that world."
+launch_options:
+  - key: world
+    label: World name
+    description: "World save name. Use an existing name to load that world."
+    type: text
+    flag: -world
+    default: "world"
+    min_length: 1
+    max_length: 64
+  - key: slots
+    label: Player slots
+    description: "Maximum simultaneous players."
+    type: number
+    flag: -slots
+    default: "10"
+    min: 1
+    max: 250
+  - key: password
+    label: Server password
+    description: "Leave blank for a public server."
+    type: password
+    flag: -password
+    max_length: 64
+  - key: owner
+    label: Owner
+    description: "Authentication/Steam name granted owner rights. Leave blank for none."
+    type: text
+    flag: -owner
+    max_length: 64
+expose:
+  - proto: udp
+save_dirs:
+  - "saves"
+backup_dirs:
+  - "saves"

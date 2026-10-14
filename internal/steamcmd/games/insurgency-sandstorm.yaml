@@ -1,0 +1,54 @@
+app_id: 581330
+slug: "insurgency-sandstorm"
+name: "Insurgency: Sandstorm"
+# Unreal Engine server. The first token is the map?Scenario=... travel string; edit the manifest (or the server's run command) to change it.
+run_command: "./Insurgency/Binaries/Linux/InsurgencyServer-Linux-Shipping Farmhouse?Scenario=Scenario_Farmhouse_Checkpoint_Security?MaxPlayers=8 -Port={PORT} -QueryPort={QUERY_PORT} -log"
+executable: "Insurgency/Binaries/Linux/InsurgencyServer-Linux-Shipping"
+stop_command: "quit"
+port: 27102
+port_name: "game"
+query_port: 27131
+notes: "Game and query ports are UDP (27102/27131). A GSLT is required to be listed publicly. Edit Insurgency/Saved/Config/Server/Game.ini, Admins.txt and MapCycle.txt after first start."
+launch_options:
+  - key: server_name
+    label: Server name
+    description: "Name shown in the server browser; uses the name from the creation form."
+    type: text
+    source: server_name
+    flag: -hostname
+    flag_separator: "="
+  - key: gslt
+    label: Game Server Login Token
+    description: "GSLT for appid 581320 from steamcommunity.com/dev/managegameservers."
+    type: password
+    flag: -GSLTToken
+    flag_separator: "="
+    max_length: 64
+  - key: password
+    label: Join password
+    description: "Leave blank for a public server."
+    type: password
+    flag: -password
+    flag_separator: "="
+    max_length: 64
+  - key: game_stats
+    label: Game stats
+    description: "Enable Steam game stats (required for stats/achievements on ranked-style servers)."
+    type: boolean
+    flag: -GameStats
+    default: "true"
+config_files:
+  - "Insurgency/Saved/Config/LinuxServer/Game.ini"
+  - "Insurgency/Saved/Config/LinuxServer/Engine.ini"
+  - "Insurgency/Config/Server/Admins.txt"
+  - "Insurgency/Config/Server/MapCycle.txt"
+expose:
+  - proto: udp
+  - port: 27131
+    proto: udp
+save_dirs:
+  - "Insurgency/Saved"
+  - "Insurgency/Config/Server"
+backup_dirs:
+  - "Insurgency/Saved"
+  - "Insurgency/Config/Server"

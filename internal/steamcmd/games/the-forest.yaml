@@ -1,0 +1,32 @@
+app_id: 556450
+slug: "the-forest"
+name: "The Forest"
+run_command: "./TheForestDedicatedServer.exe -batchmode -nographics -savefolderpath {SAVE_DIR}"
+executable: "TheForestDedicatedServer.exe"
+stop_command: "quit"
+port: 8766
+port_name: "game"
+platform: "windows"
+windows_only: true
+docker_image: "ghcr.io/flameinthedark/servy-wine:latest"
+notes: "Windows-only dedicated server (Wine). 8766/udp, 27015/udp and 27016/udp. Create config.cfg (Files tab) with serverName, serverPassword, serverSlots, then set the Config file option to config.cfg."
+launch_options:
+  - key: config_file
+    label: Config file
+    description: "Server config file relative to the server directory, e.g. config.cfg. Leave blank for defaults."
+    type: text
+    flag: -configfilepath
+    max_length: 128
+config_files:
+  - "config.cfg"
+expose:
+  - proto: udp
+  - port: 27015
+    proto: udp
+  - port: 27016
+    proto: udp
+save_dirs:
+  - "saves"
+backup_dirs:
+  - "saves"
+  - "config.cfg"

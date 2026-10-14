@@ -1,0 +1,24 @@
+app_id: 1026340
+slug: "barotrauma"
+name: "Barotrauma"
+run_command: "./DedicatedServer"
+executable: "DedicatedServer"
+stop_command: "exit"
+port: 27015
+port_name: "game"
+notes: "Game port 27015/udp plus 27016/udp for Steam queries are read from serversettings.xml (created on first start). Edit that file for name, password and slots."
+config_files:
+  - "serversettings.xml"
+  - "config_player.xml"
+  - "Data/clientpermissions.xml"
+expose:
+  - proto: udp
+  - offset: 1
+    proto: udp
+save_dirs:
+  - "Saves"
+  - "Submarines"
+backup_dirs:
+  - "Saves"
+  - "serversettings.xml"
+  - "Data/clientpermissions.xml"

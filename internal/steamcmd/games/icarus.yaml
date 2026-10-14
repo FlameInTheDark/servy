@@ -1,0 +1,34 @@
+app_id: 2089300
+slug: "icarus"
+name: "Icarus"
+run_command: "./IcarusServer.exe -Log -PORT={PORT} -QueryPort={QUERY_PORT}"
+executable: "IcarusServer.exe"
+stop_command: "quit"
+port: 17777
+port_name: "game"
+query_port: 27015
+platform: "windows"
+windows_only: true
+docker_image: "ghcr.io/flameinthedark/servy-wine:latest"
+notes: "Windows-only dedicated server (Wine). Game 17777/udp, query 27015/udp. Passwords and session settings are in Icarus/Saved/Config/WindowsServer/ServerSettings.ini after first start."
+launch_options:
+  - key: server_name
+    label: Server name
+    description: "Name shown in the server browser; uses the name from the creation form."
+    type: text
+    source: server_name
+    flag: -SteamServerName
+    flag_separator: "="
+config_files:
+  - "Icarus/Saved/Config/WindowsServer/ServerSettings.ini"
+expose:
+  - proto: udp
+  - port: 27015
+    proto: udp
+save_dirs:
+  - "Icarus/Saved/PlayerData"
+  - "Icarus/Saved/Prospects"
+backup_dirs:
+  - "Icarus/Saved/PlayerData"
+  - "Icarus/Saved/Prospects"
+  - "Icarus/Saved/Config"
