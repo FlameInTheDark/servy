@@ -113,6 +113,13 @@ func appendBooleanOption(args *[]string, option LaunchOption, enabled bool) {
 	*args = append(*args, mappedValue)
 }
 
+// SourceValue returns the value Servy derives itself for a manifest option that
+// declares a `source` (server name, ports, save directory). The panel uses it to
+// show what automatic launch parameters will contain.
+func SourceValue(source string, context LaunchContext) (string, error) {
+	return launchSourceValue(source, context)
+}
+
 func launchSourceValue(source string, context LaunchContext) (string, error) {
 	switch source {
 	case "server_name":
@@ -338,4 +345,3 @@ func GameSnapshotFromDefinitions(raw *string) (*GameSnapshot, error) {
 	}
 	return definitions.SteamGame, nil
 }
-

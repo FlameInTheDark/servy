@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -12,9 +14,11 @@ import (
 
 	"github.com/FlameInTheDark/servy/internal/authz"
 	"github.com/FlameInTheDark/servy/internal/backups"
+	"github.com/FlameInTheDark/servy/internal/files"
 	"github.com/FlameInTheDark/servy/internal/repo/gen"
 	"github.com/FlameInTheDark/servy/internal/scheduler"
 	"github.com/FlameInTheDark/servy/internal/servers"
+	"github.com/FlameInTheDark/servy/internal/steamcmd"
 )
 
 // readZipInfo summarizes an archive for the wizard (top dirs + executables).
@@ -59,6 +63,7 @@ func (a *App) readZipInfo(data []byte) (map[string]interface{}, error) {
 func (a *App) mountBackups(api fiber.Router) {
 	api.Get("/servers/:id/backups", a.listBackups)
 	api.Post("/servers/:id/backups", a.createBackup)
+	api.Get("/servers/:id/backup-folders", a.serverBackupFolders)
 	api.Get("/backups/backup/:backup_id", a.getBackup)
 	api.Patch("/backups/backup/:backup_id", a.patchBackup)
 	api.Delete("/backups/backup/:backup_id", a.deleteBackup)
@@ -76,6 +81,75 @@ func (a *App) mountBackups(api fiber.Router) {
 	api.Delete("/tasks/:task_id", a.deleteTask)
 	api.Get("/tasks/:task_id/children", a.taskChildren)
 	api.Post("/tasks/:task_id/run", a.runTask)
+}
+
+// serverBackupFolders lists what a backup of this server can cover: the folders
+// the game manifest declared (selected by default in the UI) and the top-level
+// directories that actually exist in the server folder. Servers on a node are
+// listed through their node.
+func (a *App) serverBackupFolders(c fiber.Ctx) error {
+	p := a.requireAuth(c)
+	if p == nil {
+		return nil
+	}
+	serverID := c.Params("id")
+	if !p.CanServer(serverID, authz.ServerBackup) {
+		return fail(c, 403, "NOT_AUTHORIZED")
+	}
+	def, err := a.DB.GetServer(serverID)
+	if err != nil {
+		return fail(c, 404, "SERVER_NOT_FOUND")
+	}
+	manifestDirs := steamcmd.BackupDirsFromDefinitions(def.Definitions)
+	if manifestDirs == nil {
+		manifestDirs = []string{}
+	}
+	view := fiber.Map{
+		"server_id":       serverID,
+		"manifest_dirs":   manifestDirs,
+		"manifest_source": steamcmd.BackupDirsSource(def.Definitions),
+		"dirs":            []string{},
+	}
+	dirs, err := a.serverFolders(def)
+	if err != nil {
+		// the picker still works with the manifest list and manual entries
+		view["folders_error"] = err.Error()
+	} else {
+		view["dirs"] = dirs
+	}
+	return ok(c, view)
+}
+
+// serverFolders returns the directory names in the root of one server folder.
+func (a *App) serverFolders(def gen.Server) ([]string, error) {
+	var entries []files.Entry
+	if nodeID := a.nodeIDForServer(def.ServerID); nodeID != "" {
+		if !a.nodeOnline(nodeID) {
+			return nil, errors.New("the node that runs this server is offline")
+		}
+		remote, err := a.Cluster.ListFiles(nodeID, def.ServerID, "")
+		if err != nil {
+			return nil, err
+		}
+		entries = remoteEntries(remote)
+	} else {
+		guard, err := files.NewGuard(def.Path)
+		if err != nil {
+			return nil, err
+		}
+		entries, err = a.Files.List(guard, "")
+		if err != nil {
+			return nil, err
+		}
+	}
+	dirs := []string{}
+	for _, entry := range entries {
+		if entry.Dir {
+			dirs = append(dirs, entry.Name)
+		}
+	}
+	sort.Strings(dirs)
+	return dirs, nil
 }
 
 func (a *App) listBackups(c fiber.Ctx) error {
@@ -103,6 +177,7 @@ func (a *App) createBackup(c fiber.Ctx) error {
 		Name         string   `json:"name"`
 		Location     string   `json:"location,omitempty"`
 		ExcludedDirs []string `json:"excluded_dirs,omitempty"`
+		IncludedDirs []string `json:"included_dirs,omitempty"`
 		MaxBackups   int64    `json:"max_backups"`
 		Compress     bool     `json:"compress"`
 		Shutdown     bool     `json:"shutdown"`
@@ -111,9 +186,25 @@ func (a *App) createBackup(c fiber.Ctx) error {
 		Default      bool     `json:"default"`
 		Enabled      bool     `json:"enabled"`
 		BackupType   string   `json:"backup_type,omitempty"`
+		// Absent means "use the default destination", an empty string means
+		// "keep this one local" — the panel always sends an explicit value.
+		StorageID *string `json:"storage_id,omitempty"`
 	}
 	if err := parseBody(c, &req); err != nil {
 		return err
+	}
+	storageID := ""
+	if req.StorageID == nil {
+		if def := a.Backups.DefaultStorage(); def != nil {
+			storageID = def.ID
+		}
+	} else {
+		storageID = *req.StorageID
+	}
+	if storageID != "" {
+		if _, err := a.Backups.GetStorageView(storageID); err != nil {
+			return failMsg(c, 400, "STORAGE_NOT_FOUND", "unknown storage destination")
+		}
 	}
 	def, err := a.DB.GetServer(serverID)
 	if err != nil {
@@ -124,6 +215,7 @@ func (a *App) createBackup(c fiber.Ctx) error {
 		location = filepath.Join(a.BackupRoot, servers.SanitizeServerName(def.ServerName))
 	}
 	excluded := strings.Join(req.ExcludedDirs, ",")
+	included := strings.Join(steamcmd.NormalizeBackupDirs(req.IncludedDirs), ",")
 	btype := req.BackupType
 	if btype == "" {
 		btype = "zip_vault"
@@ -132,10 +224,11 @@ func (a *App) createBackup(c fiber.Ctx) error {
 		a.DB.UnsetDefaultBackups(serverID)
 	}
 	b, err := a.Backups.Create(gen.Backup{
-		BackupName: req.Name, BackupLocation: location, ExcludedDirs: &excluded,
+		BackupName: req.Name, BackupLocation: location, ExcludedDirs: &excluded, IncludedDirs: &included,
 		MaxBackups: req.MaxBackups, ServerID: serverID, Compress: bool2i(req.Compress),
 		Shutdown: bool2i(req.Shutdown), Before: &req.Before, After: &req.After,
 		Default: bool2i(req.Default), Enabled: bool2i(req.Enabled), BackupType: btype,
+		StorageID: storageID,
 	})
 	if err != nil {
 		return failMsg(c, 400, err.Error(), err.Error())
@@ -174,9 +267,12 @@ func (a *App) patchBackup(c fiber.Ctx) error {
 		return nil
 	}
 	var req struct {
-		Name         *string  `json:"name,omitempty"`
-		Location     *string  `json:"location,omitempty"`
-		ExcludedDirs []string `json:"excluded_dirs,omitempty"`
+		Name     *string `json:"name,omitempty"`
+		Location *string `json:"location,omitempty"`
+		// without omitempty an explicit [] clears the list, while a missing
+		// field keeps whatever the config already had
+		ExcludedDirs []string `json:"excluded_dirs"`
+		IncludedDirs []string `json:"included_dirs"`
 		MaxBackups   *int64   `json:"max_backups,omitempty"`
 		Compress     *bool    `json:"compress,omitempty"`
 		Shutdown     *bool    `json:"shutdown,omitempty"`
@@ -184,9 +280,15 @@ func (a *App) patchBackup(c fiber.Ctx) error {
 		After        *string  `json:"after,omitempty"`
 		Default      *bool    `json:"default,omitempty"`
 		Enabled      *bool    `json:"enabled,omitempty"`
+		StorageID    *string  `json:"storage_id,omitempty"`
 	}
 	if err := parseBody(c, &req); err != nil {
 		return err
+	}
+	if req.StorageID != nil && *req.StorageID != "" {
+		if _, err := a.Backups.GetStorageView(*req.StorageID); err != nil {
+			return failMsg(c, 400, "STORAGE_NOT_FOUND", "unknown storage destination")
+		}
 	}
 	if req.Name != nil {
 		b.BackupName = *req.Name
@@ -197,6 +299,12 @@ func (a *App) patchBackup(c fiber.Ctx) error {
 	if req.ExcludedDirs != nil {
 		j := strings.Join(req.ExcludedDirs, ",")
 		b.ExcludedDirs = &j
+	}
+	if req.IncludedDirs != nil {
+		// an empty array clears the folder selection: the backup returns to
+		// covering the whole server directory
+		j := strings.Join(steamcmd.NormalizeBackupDirs(req.IncludedDirs), ",")
+		b.IncludedDirs = &j
 	}
 	if req.MaxBackups != nil {
 		b.MaxBackups = *req.MaxBackups
@@ -222,6 +330,9 @@ func (a *App) patchBackup(c fiber.Ctx) error {
 	if req.Enabled != nil {
 		b.Enabled = bool2i(*req.Enabled)
 	}
+	if req.StorageID != nil {
+		b.StorageID = *req.StorageID
+	}
 	if err := a.Backups.Update(b); err != nil {
 		return failMsg(c, 400, err.Error(), err.Error())
 	}
@@ -234,6 +345,18 @@ func (a *App) deleteBackup(c fiber.Ctx) error {
 		return nil
 	}
 	removeFiles := fiber.Query[bool](c, "files", false)
+	if nodeID := a.nodeIDForServer(b.ServerID); nodeID != "" {
+		if !a.nodeOnline(nodeID) {
+			return fail(c, 502, "NODE_OFFLINE")
+		}
+		if err := a.Cluster.BackupDelete(nodeID, b.ServerID, b.BackupID, removeFiles, a.Backups.BundleFor(b)); err != nil {
+			return failMsg(c, 502, "NODE_ERROR", err.Error())
+		}
+		if err := a.DB.DeleteBackup(b.BackupID); err != nil {
+			return failMsg(c, 500, "SERVER_ERROR", err.Error())
+		}
+		return ok(c, fiber.Map{"deleted": b.BackupID, "node_id": nodeID})
+	}
 	if err := a.Backups.Delete(b.BackupID, removeFiles); err != nil {
 		return failMsg(c, 400, err.Error(), err.Error())
 	}
@@ -250,10 +373,32 @@ func (a *App) runBackup(c fiber.Ctx) error {
 	if p != nil {
 		uid = p.UserID
 	}
+	if nodeID := a.nodeIDForServer(b.ServerID); nodeID != "" {
+		return a.runRemoteBackup(c, nodeID, b)
+	}
 	if err := a.Backups.Run(b.BackupID, uid); err != nil {
 		return failMsg(c, 500, err.Error(), err.Error())
 	}
 	return ok(c, fiber.Map{"backup_id": b.BackupID, "status": "completed"})
+}
+
+// runRemoteBackup executes a backup config on the node that owns the server and
+// mirrors the node's status report back into the panel row.
+func (a *App) runRemoteBackup(c fiber.Ctx, nodeID string, b gen.Backup) error {
+	if !a.nodeOnline(nodeID) {
+		return fail(c, 502, "NODE_OFFLINE")
+	}
+	raw, err := a.Cluster.BackupRun(nodeID, b.ServerID, b.BackupID, a.Backups.BundleFor(b))
+	if err != nil {
+		return failMsg(c, 502, "NODE_ERROR", err.Error())
+	}
+	if len(raw) > 0 {
+		var row gen.Backup
+		if err := json.Unmarshal(raw, &row); err == nil && row.Status != nil {
+			_ = a.DB.SetBackupStatus(row.Status, b.BackupID)
+		}
+	}
+	return ok(c, fiber.Map{"backup_id": b.BackupID, "status": "completed", "node_id": nodeID})
 }
 
 func (a *App) restoreBackup(c fiber.Ctx) error {
@@ -271,6 +416,15 @@ func (a *App) restoreBackup(c fiber.Ctx) error {
 	if p != nil {
 		uid = p.UserID
 	}
+	if nodeID := a.nodeIDForServer(b.ServerID); nodeID != "" {
+		if !a.nodeOnline(nodeID) {
+			return fail(c, 502, "NODE_OFFLINE")
+		}
+		if err := a.Cluster.BackupRestore(nodeID, b.ServerID, b.BackupID, archive, a.Backups.BundleFor(b)); err != nil {
+			return failMsg(c, 502, "NODE_ERROR", err.Error())
+		}
+		return ok(c, fiber.Map{"restored": archive, "node_id": nodeID})
+	}
 	if err := a.Backups.Restore(b.BackupID, path, uid); err != nil {
 		return failMsg(c, 500, err.Error(), err.Error())
 	}
@@ -281,6 +435,16 @@ func (a *App) backupArchives(c fiber.Ctx) error {
 	b, good := a.loadBackup(c, authz.ServerBackup)
 	if !good {
 		return nil
+	}
+	if nodeID := a.nodeIDForServer(b.ServerID); nodeID != "" {
+		if !a.nodeOnline(nodeID) {
+			return fail(c, 502, "NODE_OFFLINE")
+		}
+		raw, err := a.Cluster.BackupFiles(nodeID, b.ServerID, b.BackupID, "", a.Backups.BundleFor(b))
+		if err != nil {
+			return failMsg(c, 502, "NODE_ERROR", err.Error())
+		}
+		return ok(c, json.RawMessage(raw))
 	}
 	archives, err := a.Backups.Archives(b.BackupID)
 	if err != nil {
@@ -298,7 +462,21 @@ func (a *App) backupDownload(c fiber.Ctx) error {
 	if strings.Contains(name, "..") {
 		return fail(c, 400, "TRAVERSAL DETECTED")
 	}
-	path := filepath.Join(b.BackupLocation, name)
+	if nodeID := a.nodeIDForServer(b.ServerID); nodeID != "" {
+		if !a.nodeOnline(nodeID) {
+			return fail(c, 502, "NODE_OFFLINE")
+		}
+		data, err := a.Cluster.BackupRead(nodeID, b.ServerID, b.BackupID, name, a.Backups.BundleFor(b))
+		if err != nil {
+			return failMsg(c, 502, "NODE_ERROR", err.Error())
+		}
+		c.Set("Content-Disposition", "attachment; filename="+name)
+		return c.Send(data)
+	}
+	path, err := a.Backups.EnsureLocal(b.BackupID, name, a.Backups.PlanFor(b))
+	if err != nil {
+		return failMsg(c, 404, "ARCHIVE_NOT_FOUND", err.Error())
+	}
 	c.Set("Content-Disposition", "attachment; filename="+name)
 	return c.SendFile(path)
 }
@@ -311,6 +489,16 @@ func (a *App) backupArchiveFiles(c fiber.Ctx) error {
 	name := c.Params("name")
 	if strings.Contains(name, "..") {
 		return fail(c, 400, "TRAVERSAL DETECTED")
+	}
+	if nodeID := a.nodeIDForServer(b.ServerID); nodeID != "" {
+		if !a.nodeOnline(nodeID) {
+			return fail(c, 502, "NODE_OFFLINE")
+		}
+		raw, err := a.Cluster.BackupFiles(nodeID, b.ServerID, b.BackupID, name, a.Backups.BundleFor(b))
+		if err != nil {
+			return failMsg(c, 502, "NODE_ERROR", err.Error())
+		}
+		return ok(c, json.RawMessage(raw))
 	}
 	path := filepath.Join(b.BackupLocation, name)
 	files, err := a.Backups.ListArchiveFiles(path)

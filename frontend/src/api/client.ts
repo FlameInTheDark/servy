@@ -4,9 +4,13 @@ const BASE = "/api/v1";
 
 export class APIError extends Error {
   code: string;
-  constructor(code: string, message: string) {
+  /** Full error envelope — carries extra fields some endpoints return
+   *  (e.g. the server names that block removing a cluster node). */
+  payload: any;
+  constructor(code: string, message: string, payload?: any) {
     super(message);
     this.code = code;
+    this.payload = payload;
   }
 }
 
@@ -49,7 +53,7 @@ export async function api<T = any>(
     throw new APIError("SERVER_ERROR", `HTTP ${res.status}`);
   }
   if (!res.ok || json.status === "error") {
-    throw new APIError(json.error || `HTTP_${res.status}`, json.error_data || json.error || "request failed");
+    throw new APIError(json.error || `HTTP_${res.status}`, json.error_data || json.error || "request failed", json);
   }
   return json.data as T;
 }
@@ -241,6 +245,8 @@ export interface BackupConfig {
   created: string;
   backup_name: string;
   backup_location: string;
+  /** Folders the backup covers. Empty = the whole server folder. */
+  included_dirs: string[];
   excluded_dirs: string[];
   max_backups: number;
   server_id: string;
@@ -251,7 +257,67 @@ export interface BackupConfig {
   default: boolean;
   enabled: boolean;
   backup_type: string;
+  /** Storage destination the archives are uploaded to (empty = local only). */
+  storage_id?: string;
   status: Record<string, any>;
+}
+
+/** What a backup of one server can cover, as the panel sees it. */
+export interface ServerBackupFolders {
+  server_id: string;
+  /** Folders the game manifest declares (empty for non-Steam servers). */
+  manifest_dirs: string[];
+  /** Where those folders come from, e.g. the game name. */
+  manifest_source: string;
+  /** Directories that exist in the server folder right now. */
+  dirs: string[];
+  /** Set when the server folder could not be listed (node offline, …). */
+  folders_error?: string;
+}
+
+/** One field of a storage destination form; the panel drives the shape. */
+export interface BackupStorageField {
+  key: string;
+  label: string;
+  hint?: string;
+  type: "text" | "password" | "boolean" | "number" | string;
+  required: boolean;
+  default?: string;
+}
+
+export interface BackupStorageUsage {
+  backup_id: string;
+  backup_name: string;
+  server_id: string;
+}
+
+export interface BackupStorage {
+  storage_id: string;
+  created: string;
+  name: string;
+  kind: string;
+  prefix: string;
+  settings: Record<string, string>;
+  /** Which settings hold secrets — those come back masked. */
+  secrets?: Record<string, boolean>;
+  enabled: boolean;
+  default: boolean;
+  /** Panel identity the archives are namespaced under. */
+  cluster_id: string;
+  location?: string;
+  namespace?: string;
+  fields: BackupStorageField[];
+  used_by?: BackupStorageUsage[];
+}
+
+/** An archive as the panel reports it: local cache, destination, or both. */
+export interface BackupArchive {
+  name: string;
+  size: number;
+  modified: string;
+  path?: string;
+  type: string;
+  source: "local" | "remote" | "both" | string;
 }
 
 export interface TaskView {

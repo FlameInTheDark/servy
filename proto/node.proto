@@ -5,9 +5,16 @@ package servy.node.v1;
 option go_package = "github.com/FlameInTheDark/servy/internal/cluster/pb;pb";
 
 // NodeService is served by every node in a cluster (panel + agents).
-// Panel nodes proxy user operations to agents; agents push heartbeats & events upstream.
+//
+// Connection model: agents dial the panel's node API (join → hello → heartbeat)
+// and the panel dials each agent's node API to run server operations. Nothing
+// in the panel↔agent direction is initiated from the agent except registration,
+// telemetry and the event stream.
 service NodeService {
-  // Membership
+  // Membership. Join exchanges a single-use join ticket (issued by the panel
+  // UI/API) for a permanent per-node credential; it is the only unauthenticated
+  // call.
+  rpc Join(JoinRequest) returns (JoinResponse);
   rpc Hello(HelloRequest) returns (HelloResponse);
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
 
@@ -22,14 +29,49 @@ service NodeService {
   rpc ListServers(ListServersRequest) returns (ListServersResponse);
   rpc SendStdin(StdinRequest) returns (Ack);
   rpc ReadTerminal(TerminalRequest) returns (TerminalChunk);
+  rpc UpdateServerConfig(NodeRequest) returns (NodeReply);
+  rpc ServerHistory(HistoryRequest) returns (NodeReply);
+  rpc AgreeEula(ServerRequest) returns (NodeReply);
+  rpc UpdateExecutable(ServerRequest) returns (NodeReply);
+  rpc CloneServer(CloneServerRequest) returns (NodeReply);
 
-  // Events stream (agent -> panel)
+  // Events stream (agent -> panel), long lived.
   rpc StreamEvents(stream NodeEvent) returns (Ack);
 
-  // Files (basic remote ops for v1)
-  rpc FileRead(FileRequest) returns (FileContent);
-  rpc FileWrite(FileWriteRequest) returns (Ack);
-  rpc FileList(FileRequest) returns (DirListing);
+  // Files. ReadFile/WriteFile are streaming so large worlds and uploads work;
+  // FileOp covers the remaining file-manager actions.
+  rpc ListFiles(FileRequest) returns (DirListing);
+  rpc ReadFile(FileStreamRequest) returns (stream FileChunk);
+  rpc WriteFile(stream FileChunk) returns (Ack);
+  rpc FileOp(FileOpRequest) returns (NodeReply);
+
+  // Backups (archives live on the node, metadata lives on the panel).
+  rpc BackupRun(BackupRunRequest) returns (NodeReply);
+  rpc BackupRestore(BackupRef) returns (NodeReply);
+  rpc BackupDelete(BackupRef) returns (NodeReply);
+  rpc BackupFiles(BackupRef) returns (NodeReply);
+  rpc BackupRead(BackupReadRequest) returns (stream FileChunk);
+
+  // Wizard archive transfer (zip/jar imports created on a remote node).
+  rpc UploadArchive(stream ArchiveChunk) returns (NodeReply);
+}
+
+message JoinRequest {
+  string ticket = 1;      // single-use join ticket issued by the panel
+  string name = 2;        // node display name (defaults to the hostname)
+  string version = 3;
+  string hostname = 4;
+  int32 grpc_port = 5;    // local node API port
+  string advertise = 6;   // optional explicit host:port the panel should dial
+  repeated string capabilities = 7;
+}
+
+message JoinResponse {
+  bool accepted = 1;
+  string message = 2;
+  string node_id = 3;
+  string token = 4;       // permanent per-node credential (store securely)
+  string panel_grpc = 5;  // panel node API address agents should use
 }
 
 message HelloRequest {
@@ -56,6 +98,7 @@ message HeartbeatRequest {
   int64 disk_used = 7;
   int32 running_servers = 8;
   string version = 9;
+  int32 total_servers = 10;
 }
 
 message HeartbeatResponse {
@@ -65,7 +108,7 @@ message HeartbeatResponse {
 
 message CreateServerRequest {
   string server_id = 1;
-  string definition = 2; // JSON gen.Server row
+  string definition = 2; // JSON creation.Request — the node runs the full pipeline
 }
 
 message DeleteServerRequest {
@@ -81,6 +124,7 @@ message ServerRequest {
 message ServerActionResponse {
   bool ok = 1;
   string message = 2;
+  string payload = 3; // JSON (server id / definition) where the caller needs it
 }
 
 message ServerStatusResponse {
@@ -92,6 +136,10 @@ message ServerStatusResponse {
   int32 max = 6;
   repeated string players = 7;
   string version = 8;
+  string desc = 9;
+  int64 world_size = 10;
+  bool eula_pending = 11;
+  double ping_ms = 12;
 }
 
 message ListServersRequest {}
@@ -114,6 +162,28 @@ message TerminalChunk {
   repeated string lines = 1;
 }
 
+message HistoryRequest {
+  string server_id = 1;
+  int32 hours = 2;
+}
+
+message NodeRequest {
+  string server_id = 1;
+  string payload = 2; // JSON
+}
+
+message NodeReply {
+  bool ok = 1;
+  string message = 2;
+  string payload = 3; // JSON
+}
+
+message CloneServerRequest {
+  string server_id = 1;
+  string new_server_id = 2;
+  string name = 3;
+}
+
 message NodeEvent {
   string node_id = 1;
   string server_id = 2;
@@ -132,14 +202,28 @@ message FileRequest {
   string path = 2;
 }
 
-message FileContent {
-  bytes content = 1;
+message FileStreamRequest {
+  string server_id = 1;
+  string path = 2;
+  int64 max_bytes = 3;
 }
 
-message FileWriteRequest {
+message FileChunk {
   string server_id = 1;
   string path = 2;
   bytes content = 3;
+  int64 offset = 4;
+  bool eof = 5;
+  string error = 6;
+}
+
+message FileOpRequest {
+  string server_id = 1;
+  string op = 2;   // mkdir | create | delete | move | copy | zip | unzip | stat
+  string path = 3;
+  string dst = 4;
+  repeated string paths = 5;
+  string payload = 6; // JSON extras
 }
 
 message DirEntry {
@@ -151,4 +235,41 @@ message DirEntry {
 
 message DirListing {
   repeated DirEntry entries = 1;
+}
+
+message BackupRunRequest {
+  string server_id = 1;
+  string backup_id = 2;
+  // JSON backup bundle: {"backup": gen.Backup, "storage": gen.BackupStorage,
+  // "cluster_id": string}. A bare gen.Backup object is still accepted for
+  // nodes running an older version of Servy.
+  string payload = 3;
+}
+
+message BackupRef {
+  string server_id = 1;
+  string backup_id = 2;
+  string archive = 3; // archive file name inside the backup
+  bool remove_files = 4;
+  // JSON backup bundle (same shape as BackupRunRequest.payload): the panel
+  // re-sends the backup row and its storage destination so a node always acts
+  // on the current configuration and can reach archives that only exist in
+  // the remote storage.
+  string payload = 5;
+}
+
+message BackupReadRequest {
+  string server_id = 1;
+  string backup_id = 2;
+  string path = 3; // archive path relative to the backup dir
+  int64 max_bytes = 4;
+  // JSON backup bundle, see BackupRef.payload.
+  string payload = 5;
+}
+
+message ArchiveChunk {
+  string transfer_id = 1;
+  bytes content = 2;
+  string name = 3; // original file name (first chunk only)
+  bool eof = 4;
 }

@@ -42,6 +42,20 @@ type Backup struct {
 	Status         *string
 	Enabled        int64
 	BackupType     string
+	StorageID      string
+	IncludedDirs   *string
+}
+
+type BackupStorage struct {
+	StorageID string
+	Created   string
+	Name      string
+	Kind      string
+	Prefix    string
+	Settings  string
+	Enabled   int64
+	Default   int64
+	ClusterID string
 }
 
 type HostStat struct {

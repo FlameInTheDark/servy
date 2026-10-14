@@ -50,6 +50,7 @@ docker compose up -d
 
 The panel image (`ghcr.io/flameinthedark/servy`) includes all Java runtimes (8/11/17/21) and SteamCMD.
 Mount `/var/run/docker.sock` to let Servy spawn sibling containers for SteamCMD games.
+Full compose reference, volumes and ports: [`docs/docker.md`](docs/docker.md).
 
 > **Windows-only games** (Abiotic Factor, V Rising, etc.) use the companion `servy-wine` image (Wine + SteamCMD).
 > See `docker/steamcmd-wine/README.md` for details.
@@ -63,12 +64,12 @@ Mount `/var/run/docker.sock` to let Servy spawn sibling containers for SteamCMD 
 - **Java Version Manager** — Auto-detects JVMs (8/11/17/21/25), per-server selection, MC version to Java matrix hints; Docker image ships all runtimes
 - **Real-time Terminal** — xterm.js over WebSocket, ANSI color, command queue, keyword highlights, multiple shell choices (bash, sh, cmd, pwsh, git-bash)
 - **File Manager** — Browse, edit, upload, zip/unzip, download — traversal-proof PathGuard on every path
-- **Backups** — Zip vault (compressed, retention) + snapshots (deduplicated), pre/post hooks, stop-before-backup, restore and browse
-- **Schedules** — Interval, cron, daily, one-shot; reaction children on start/stop/crash/backup with delays
+- **Backups** — Zip vault (compressed, retention) + snapshots (deduplicated), per-config folder selection (pre-filled from the game manifest), stop-before-backup, before/after console commands, restore and browse; archives can be uploaded to **S3/FTP/FTPS/WebDAV** destinations with per-panel retention ([docs](docs/backups.md))
+- **Schedules** — Every N minutes/hours/days, cron expressions, one-time runs; reaction children on start/stop/crash/backup with delays
 - **Monitoring** — Host + per-server stats (adaptive sampling), Java/Bedrock pings, player tracking, Prometheus `/metrics`
 - **Webhooks** — Discord, Slack, Mattermost, Teams, Generic — templated bodies, per-event triggers
 - **Auth & RBAC** — Argon2id, JWT sessions, TOTP 2FA + recovery codes, API keys (hashed at rest), 8-bit permission masks, quantity limits
-- **Cluster & Agents** — Proxmox-style multi-node: register headless agents (`servy-agent`), manage remote servers from any panel, mTLS-ready
+- **Cluster & Agents** — Proxmox-style multi-node: add a machine with a one-time join ticket (`servy agent run --panel HOST:PORT --ticket T`), then create and manage its servers from the same panel — lifecycle, console, files, configs, backups, schedules
 - **Config Editors** — Visual editor for `server.properties` (grouped schema), JSON with live validation, YAML/properties/text raw mode
 - **Manifests** — Separate SteamCMD game catalog entries from reusable server-creation recipes; see the [manifest workflows](docs/manifests.md)
 
@@ -81,10 +82,11 @@ Mount `/var/run/docker.sock` to let Servy spawn sibling containers for SteamCMD 
 servy serve [--data DIR]       # Run the panel (API + WS + UI + engine)
 servy setup [-u -p]            # Create the first admin user
 servy user add|list|passwd     # User management
-servy agent --panel HOST:PORT  # Run as headless cluster agent
+servy agent run --panel HOST:PORT --ticket T  # Join a panel and run as a node (or: servy --agent run …)
 servy manifest list|add        # Manage server-creation recipe manifests
 servy game-manifest list|validate|add|remove  # Manage SteamCMD game definitions
-servy node hello --addr ADDR   # Test cluster connectivity
+servy agent status|leave       # Node registration state / forget credentials
+servy node list|whoami         # Servers this node runs / node identity
 servy migrate status           # Database migration status
 servy version                  # Build info (version, commit, date)
 ```
@@ -97,7 +99,7 @@ servy version                  # Build info (version, commit, date)
 |-------|------|
 | Installation & Config | [`docs/install.md`](docs/install.md) |
 | Docker Deployment | [`docs/docker.md`](docs/docker.md) |
-| Cluster Setup | [`docs/cluster.md`](docs/cluster.md) |
+| Cluster Setup (nodes & join tickets) | [`docs/cluster.md`](docs/cluster.md) |
 | SteamCMD Games | [`docs/steamcmd.md`](docs/steamcmd.md) |
 | Backup Strategies | [`docs/backups.md`](docs/backups.md) |
 | API Reference | [`docs/api.md`](docs/api.md) |

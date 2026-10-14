@@ -74,6 +74,9 @@ type Request struct {
         DockerNetwork    string            `json:"docker_network,omitempty"`
         DockerWorkdir    string            `json:"docker_workdir,omitempty"` // container workdir (default /data)
         DockerAutoremove bool              `json:"docker_autoremove,omitempty"`
+        // Backup folders declared by a creation recipe (configedit.Manifest).
+        // Steam servers keep theirs in the frozen game snapshot instead.
+        BackupDirs []string `json:"backup_dirs,omitempty"`
         // roles to grant access
         Roles []int64 `json:"roles,omitempty"`
         // misc
@@ -434,6 +437,16 @@ func (s *Service) Create(r Request, userID int64) (*Result, error) {
         }
         if def.Type == "" {
                 def.Type = "custom"
+        }
+        // A recipe's backup folders are frozen into the server row, so editing
+        // the recipe later does not change what existing servers back up.
+        if def.Definitions == nil && len(r.BackupDirs) > 0 {
+                encoded, encodeErr := steamcmd.EncodeServerBackupDirs(def.Definitions, r.BackupDirs, "")
+                if encodeErr != nil {
+                        os.RemoveAll(dir)
+                        return nil, fmt.Errorf("store backup folders: %w", encodeErr)
+                }
+                def.Definitions = encoded
         }
 
         sup, err := s.reg.Create(def)

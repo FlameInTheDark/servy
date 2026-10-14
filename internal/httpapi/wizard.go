@@ -1,11 +1,15 @@
 package httpapi
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+
 	"github.com/gofiber/fiber/v3"
 
 	"github.com/FlameInTheDark/servy/internal/authz"
 	"github.com/FlameInTheDark/servy/internal/creation"
-	"github.com/FlameInTheDark/servy/internal/repo/gen"
+	"github.com/FlameInTheDark/servy/internal/events"
 )
 
 // creationRequest is the API wizard payload (JSON tags) translated into the
@@ -37,6 +41,7 @@ type creationRequest struct {
 	DockerNetwork    string            `json:"docker_network"`
 	DockerWorkdir    string            `json:"docker_workdir"`
 	DockerAutoremove bool              `json:"docker_autoremove"`
+	BackupDirs       []string          `json:"backup_dirs"`
 	Roles            []int64 `json:"roles"`
 	AutoStart        bool    `json:"auto_start"`
 	CrashDetection   bool    `json:"crash_detection"`
@@ -55,19 +60,81 @@ func (r creationRequest) toCreationRequest() creation.Request {
 		DockerImage: r.DockerImage, DockerEnv: r.DockerEnv, DockerPorts: r.DockerPorts,
 		DockerBinds: r.DockerBinds, DockerNetwork: r.DockerNetwork,
 		DockerWorkdir: r.DockerWorkdir, DockerAutoremove: r.DockerAutoremove,
+		BackupDirs: r.BackupDirs,
 	}
 }
 
-// toDef builds a DB definition (used for remote node creation).
-func (r creationRequest) toDef(serversRoot string) gen.Server {
-	return gen.Server{
-		ServerName: r.Name, ServerPort: int64(r.Port), Type: r.ServerType,
-		Executable: r.Executable, ExecutionCommand: r.ExecutionCommand, StopCommand: r.StopCommand,
-		AutoStart: bool2i(r.AutoStart), CrashDetection: bool2i(r.CrashDetection),
-		JavaSelection: r.JavaSelection, Shell: r.Shell, ExecutionBackend: r.ExecutionBackend,
-		DockerImage: &r.DockerImage, DockerNetwork: &r.DockerNetwork, DockerWorkdir: &r.DockerWorkdir,
-		DockerAutoremove: bool2i(r.DockerAutoremove),
+// createServerOnNode provisions a server on a cluster node: the node runs its
+// own creation pipeline (download, extraction, steam install) and the panel
+// mirrors the resulting row so the server is fully manageable from here.
+func (a *App) createServerOnNode(c fiber.Ctx, p *authz.Principal, nodeID string, cr creation.Request) error {
+	if a.Cluster == nil {
+		return fail(c, 500, "CLUSTER_DISABLED")
 	}
+	if !a.nodeOnline(nodeID) {
+		return fail(c, 502, "NODE_OFFLINE")
+	}
+	if err := a.Creation.Validate(cr); err != nil {
+		return failMsg(c, 400, err.Error(), err.Error())
+	}
+	// archives referenced by the wizard (zip / jar) live on the panel: stream
+	// them to the node and point the node-side request at its spool copy.
+	if cr.ArchivePath != "" && (cr.CreateType == creation.CreateImportZip || cr.CreateType == creation.CreateImportJar) {
+		local := cr.ArchivePath
+		if !filepath.IsAbs(local) {
+			local = filepath.Join(a.ImportDir, local)
+		}
+		f, err := os.Open(local)
+		if err != nil {
+			return failMsg(c, 400, "INVALID_ARCHIVE", "uploaded archive is no longer available on the panel: "+err.Error())
+		}
+		nodePath, err := a.Cluster.UploadArchiveFrom(nodeID, f, filepath.Base(local))
+		f.Close()
+		if err != nil {
+			return failMsg(c, 502, "NODE_ERROR", err.Error())
+		}
+		cr.ArchivePath = nodePath
+	}
+	serverID := newUUID()
+	res, err := a.Cluster.Create(nodeID, serverID, cr)
+	if err != nil {
+		return failMsg(c, 502, "NODE_ERROR", err.Error())
+	}
+	def, derr := parseServerDef(res.Def)
+	if derr != nil {
+		return failMsg(c, 502, "NODE_ERROR", derr.Error())
+	}
+	var owner *int64
+	if p != nil {
+		uid := p.UserID
+		owner = &uid
+	}
+	if err := a.mirrorRemoteServer(def, nodeID, owner); err != nil {
+		return failMsg(c, 500, "SERVER_ERROR", err.Error())
+	}
+	if err := a.Backups.EnsureDefault(def, a.BackupRoot); err != nil {
+		a.Log.Get("server").Warning("cluster: default backup for %s failed: %v", def.ServerID, err)
+	}
+	out := fiber.Map{
+		"server_id": def.ServerID, "name": def.ServerName, "type": def.Type,
+		"remote": true, "node_id": nodeID,
+	}
+	if len(res.Result) > 0 {
+		var result creation.Result
+		if err := json.Unmarshal(res.Result, &result); err == nil {
+			out["needs_confirm"] = result.NeedsConfirm
+			if len(result.DetectedExes) > 0 {
+				out["detected_executables"] = result.DetectedExes
+			}
+			if len(result.SteamOutput) > 0 {
+				out["steam_output"] = result.SteamOutput
+			}
+		}
+	}
+	a.Log.Audit("", userIDOf(c), def.ServerID, c.IP(), "Created server on node "+nodeID)
+	a.Bus.Publish(events.Event{Type: events.EvSendStartReload, ServerID: def.ServerID,
+		Data: map[string]interface{}{"node_id": nodeID, "remote": true}})
+	return ok(c, out)
 }
 
 func bool2i(b bool) int64 {

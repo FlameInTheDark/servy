@@ -1,5 +1,7 @@
-// Command servy is the Servy panel binary (single file:
-// API + websocket + embedded React UI + scheduler + cluster).
+// Command servy is the single Servy binary: the panel (API + websocket +
+// embedded React UI + scheduler + cluster) and the headless node agent
+// (`servy agent …` or `servy --agent …` on a machine that runs servers for a
+// panel on another host).
 package main
 
 import (
@@ -14,7 +16,7 @@ import (
 
 func main() {
 	httpapi.SPAFiles = spa.FS()
-	if err := cli.Root().Run(context.Background(), os.Args); err != nil {
+	if err := cli.Root().Run(context.Background(), cli.AgentModeArgs(os.Args)); err != nil {
 		fmt.Fprintln(os.Stderr, "servy:", err)
 		os.Exit(1)
 	}

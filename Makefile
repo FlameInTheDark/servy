@@ -19,7 +19,6 @@ frontend:
 
 backend:
 	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/servy ./cmd/servy
-	$(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/servy-agent ./cmd/servy-agent
 
 build: frontend backend
 

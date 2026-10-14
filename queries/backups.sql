@@ -1,7 +1,7 @@
 -- name: CreateBackup :one
-INSERT INTO backups (backup_id, created, backup_name, backup_location, excluded_dirs, max_backups, server_id,
+INSERT INTO backups (backup_id, created, backup_name, backup_location, excluded_dirs, included_dirs, max_backups, server_id,
   compress, shutdown, before, after, "default", status, enabled, backup_type)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
 -- name: GetBackup :one
@@ -11,11 +11,12 @@ SELECT * FROM backups WHERE backup_id = ?;
 SELECT * FROM backups WHERE server_id = ? ORDER BY created;
 
 -- name: GetDefaultBackup :one
-SELECT * FROM backups WHERE server_id = ? AND default = 1 LIMIT 1;
+SELECT * FROM backups WHERE server_id = ? AND "default" = 1 LIMIT 1;
 
 -- name: UpdateBackup :exec
-UPDATE backups SET backup_name = ?, backup_location = ?, excluded_dirs = ?, max_backups = ?, compress = ?,
-  shutdown = ?, before = ?, after = ?, default = ?, status = ?, enabled = ?, backup_type = ? WHERE backup_id = ?;
+UPDATE backups SET backup_name = ?, backup_location = ?, excluded_dirs = ?, included_dirs = ?, max_backups = ?, compress = ?,
+  shutdown = ?, "before" = ?, "after" = ?, "default" = ?, status = ?, enabled = ?, backup_type = ?,
+  storage_id = ? WHERE backup_id = ?;
 
 -- name: SetBackupStatus :exec
 UPDATE backups SET status = ? WHERE backup_id = ?;
@@ -27,7 +28,7 @@ DELETE FROM backups WHERE backup_id = ?;
 DELETE FROM backups WHERE server_id = ?;
 
 -- name: UnsetDefaultBackups :exec
-UPDATE backups SET default = 0 WHERE server_id = ?;
+UPDATE backups SET "default" = 0 WHERE server_id = ?;
 
 -- name: CreateWebhook :one
 INSERT INTO webhooks (webhook_id, created, server_id, name, url, webhook_type, bot_name, trigger, body, color, enabled)
