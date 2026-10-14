@@ -9,6 +9,7 @@ import { useApi } from "@/hooks/useApi";
 import { api, ServerDef, realtime } from "@/api/client";
 import { Button, Badge, Input, Skeleton } from "@/components/ui/primitives";
 import { cn } from "@/lib/utils";
+import { isTransitional, serverState, stateVariant } from "@/lib/server-state";
 
 /* ------------------------------- helpers ---------------------------------- */
 
@@ -22,22 +23,6 @@ const TYPE_LABELS: Record<string, string> = {
 
 function typeLabel(t: string) {
   return TYPE_LABELS[t] || t;
-}
-
-function stateColor(state: string) {
-  switch (state) {
-    case "running": return "success";
-    case "crashed": return "destructive";
-    case "starting":
-    case "stopping": return "warning";
-    default: return "muted";
-  }
-}
-
-function effectiveState(s: ServerDef) {
-  if (s.importing) return "importing";
-  if (s.updating) return "updating";
-  return s.state || "stopped";
 }
 
 function uptimeOf(s: ServerDef) {
@@ -66,8 +51,8 @@ function ServerCard({ s, node, onAction }: {
   node?: { name: string; online: boolean };
   onAction: (a: "start" | "stop" | "restart") => void;
 }) {
-  const state = effectiveState(s);
-  const busy = state === "starting" || state === "stopping" || state === "importing" || state === "updating";
+  const state = serverState(s);
+  const busy = isTransitional(state);
   const uptime = uptimeOf(s);
   const remote = !!s.node_id && s.node_id !== "local";
   const nodeOffline = remote && node?.online === false;
@@ -93,7 +78,7 @@ function ServerCard({ s, node, onAction }: {
             </div>
           </div>
         </div>
-        <Badge variant={stateColor(state) as any} className="shrink-0 capitalize">
+        <Badge variant={stateVariant(state)} className="shrink-0 capitalize">
           {state === "running" && <span className="mr-1 h-1.5 w-1.5 rounded-full bg-success animate-pulse-dot" />}
           {state}
         </Badge>
@@ -218,7 +203,6 @@ export default function ServersListPage() {
     if (q && !s.server_name.toLowerCase().includes(q.toLowerCase())) return false;
     if (nodeFilter === "local" && s.node_id && s.node_id !== "local") return false;
     if (nodeFilter !== "all" && nodeFilter !== "local" && s.node_id !== nodeFilter) return false;
-    const st = effectiveState(s);
     if (filter === "running") return s.running;
     if (filter === "stopped") return !s.running && !s.importing && !s.updating;
     if (filter === "issues") return s.crashed;
