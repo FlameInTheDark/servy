@@ -91,22 +91,6 @@ servy version                  # Build info (version, commit, date)
 
 ---
 
-## Project Layout
-
-```
-cmd/servy/           # Panel binary (API + WS + UI + engine)
-cmd/servy-agent/     # Headless agent binary
-internal/            # 28 Go packages (httpapi, servers, dockerx, backups, cluster, ...)
-frontend/            # React 19 + Vite + TS + Tailwind + shadcn-style UI (dark)
-proto/               # gRPC node service contract
-queries/ + sqlc.yaml # SQL to typed Go (sqlc)
-deploy/              # systemd unit + Caddy examples
-Dockerfile           # Multi-stage; debian:slim runtime w/ Java 8/11/17/21 + steamcmd
-docker/steamcmd-wine/# Wine + SteamCMD base image for Windows-only games
-```
-
----
-
 ## Documentation
 
 | Topic | Link |
