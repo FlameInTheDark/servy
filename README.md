@@ -31,6 +31,12 @@ make build
 
 Open **http://localhost:8443** → follow the wizard → create a server (zip import, jar download, SteamCMD game, or custom) → play.
 
+<p align="center">
+  <img src="docs/screenshot-dashboard.jpeg" alt="Dashboard" width="800" />
+  <br />
+  <em>Setup wizard & dashboard</em>
+</p>
+
 ### Docker
 
 One-liner — no clone needed (Linux/macOS shell, Docker Compose v2):
@@ -73,6 +79,17 @@ Full compose reference, volumes and ports: [`docs/docker.md`](docs/docker.md).
 - **Config Editors** — Visual editor for `server.properties` (grouped schema), JSON with live validation, YAML/properties/text raw mode
 - **Manifests** — Separate SteamCMD game catalog entries from reusable server-creation recipes; see the [manifest workflows](docs/manifests.md)
 
+<p align="center">
+  <img src="docs/screenshot-server.jpeg" alt="Server Management" width="800" />
+  <br />
+  <em>Server management — console, files, configs, backups, schedules, monitoring</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshot-create-server.jpeg" alt="Create Server" width="800" />
+  <br />
+  <em>Create server wizard — zip import, JAR download, SteamCMD games, or custom executables</em>
+</p>
 
 ---
 
